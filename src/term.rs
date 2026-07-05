@@ -73,21 +73,33 @@ impl Term {
     /// Wide characters keep avt's occupancy convention: the leading cell has
     /// `width == 2` and the following continuation cell has `width == 0`.
     pub fn snapshot(&self) -> GridSnapshot {
+        let mut out = GridSnapshot {
+            cols: 0,
+            rows: 0,
+            cells: Vec::new(),
+            cursor: self.cursor(),
+        };
+        self.snapshot_into(&mut out);
+        out
+    }
+
+    /// Overwrites `out` with a snapshot of the visible screen, reusing its
+    /// cell buffer — no allocation once the buffer has reached the screen
+    /// size. Semantics are identical to [`Term::snapshot`].
+    pub fn snapshot_into(&self, out: &mut GridSnapshot) {
         let (cols, rows) = self.vt.size();
-        let mut cells = vec![Cell::default(); cols * rows];
+        out.cols = cols;
+        out.rows = rows;
+        out.cells.clear();
+        out.cells.resize(cols * rows, Cell::default());
 
         for (row, line) in self.vt.view().take(rows).enumerate() {
             for (col, cell) in line.cells().iter().take(cols).enumerate() {
-                cells[row * cols + col] = convert_cell(cell);
+                out.cells[row * cols + col] = convert_cell(cell);
             }
         }
 
-        GridSnapshot {
-            cols,
-            rows,
-            cells,
-            cursor: self.cursor(),
-        }
+        out.cursor = self.cursor();
     }
 
     /// The visible screen as plain text: one line per row, trailing

@@ -59,6 +59,12 @@ pub struct FontSet {
     symbols: OnceCell<Font>,
     px: f32,
     cache: HashMap<(char, bool, bool), CachedGlyph>,
+    /// Running max of `ymin + height` over every cached glyph: how far above
+    /// the baseline any glyph ever rasterized reaches (in pixels).
+    max_rise: i32,
+    /// Running min of `ymin` over every cached glyph: the deepest descender
+    /// below the baseline (negative) ever rasterized.
+    min_ymin: i32,
 }
 
 fn load(bytes: &[u8]) -> Font {
@@ -76,7 +82,18 @@ impl FontSet {
             symbols: OnceCell::new(),
             px,
             cache: HashMap::new(),
+            max_rise: 0,
+            min_ymin: 0,
         }
+    }
+
+    /// Vertical reach of every glyph rasterized so far, relative to the
+    /// baseline: `(max ymin + height, min ymin)`. Bounds how far above/below
+    /// its cell any drawn glyph can bleed; grows monotonically as new glyphs
+    /// enter the cache, and every glyph on a rendered canvas has passed
+    /// through the cache.
+    pub fn glyph_reach(&self) -> (i32, i32) {
+        (self.max_rise, self.min_ymin)
     }
 
     pub fn px(&self) -> f32 {
@@ -151,6 +168,10 @@ impl FontSet {
                 let (metrics, bitmap) = font.rasterize(drawn, self.px);
                 CachedGlyph { metrics, bitmap }
             };
+            self.max_rise = self
+                .max_rise
+                .max(entry.metrics.ymin + entry.metrics.height as i32);
+            self.min_ymin = self.min_ymin.min(entry.metrics.ymin);
             self.cache.insert(key, entry);
         }
         &self.cache[&key]

@@ -26,11 +26,47 @@ fn cell_colors(cell: &Cell, theme: &Theme) -> (Rgb, Rgb) {
     (fg, bg)
 }
 
+/// Half-open pixel clip rect used by the renderer's damage repaint: writes
+/// outside it are dropped so a partially repainted region composes exactly
+/// with untouched neighboring pixels.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Clip {
+    pub x0: i32,
+    pub y0: i32,
+    pub x1: i32,
+    pub y1: i32,
+}
+
+impl Clip {
+    fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x0 && x < self.x1 && y >= self.y0 && y < self.y1
+    }
+}
+
+/// `Canvas::fill_rect` restricted to `clip` (no-op clip when `None`).
+fn fill_rect_clipped(
+    canvas: &mut Canvas,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    c: Rgb,
+    clip: Option<&Clip>,
+) {
+    let (x0, y0, x1, y1) = match clip {
+        None => (x0, y0, x1, y1),
+        Some(cl) => (x0.max(cl.x0), y0.max(cl.y0), x1.min(cl.x1), y1.min(cl.y1)),
+    };
+    if x0 < x1 && y0 < y1 {
+        canvas.fill_rect(x0, y0, x1, y1, c);
+    }
+}
+
 /// Blends one glyph's coverage bitmap in `color` over the canvas.
 ///
 /// `clip_x` bounds the drawn columns; wide glyphs are clipped to their
 /// two-cell box, normal glyphs only to the canvas (so italic overhang
-/// survives).
+/// survives). `clip` additionally restricts writes to a damage rect.
 #[allow(clippy::too_many_arguments)]
 fn draw_glyph(
     canvas: &mut Canvas,
@@ -42,6 +78,7 @@ fn draw_glyph(
     baseline_y: i32,
     color: Rgb,
     clip_x: Option<(i32, i32)>,
+    clip: Option<&Clip>,
 ) {
     let glyph = fonts.glyph(ch, bold, italic);
     let gw = glyph.metrics.width as i32;
@@ -59,12 +96,164 @@ fn draw_glyph(
             {
                 continue;
             }
+            if let Some(cl) = clip
+                && !cl.contains(x, y)
+            {
+                continue;
+            }
             let cov = glyph.bitmap[(row * gw + col) as usize];
             if cov > 0 {
                 canvas.blend_px(x, y, color, cov as f32 / 255.0);
             }
         }
     }
+}
+
+/// Draws one grid row — the per-row body of [`draw_grid`], shared with the
+/// renderer's damage repaint. All writes are restricted to `clip` when given;
+/// because cells paint in the same left-to-right order as a full redraw, the
+/// pixels inside the clip receive exactly the operations a full redraw would
+/// apply to them.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_row(
+    canvas: &mut Canvas,
+    snap: &GridSnapshot,
+    theme: &Theme,
+    fonts: &mut FontSet,
+    metrics: &Metrics,
+    origin: (f32, f32),
+    cursor_visible: bool,
+    row: usize,
+    clip: Option<&Clip>,
+) {
+    let line_thickness = metrics.line_thickness as i32;
+
+    for col in 0..snap.cols {
+        let cell = snap.cell(col, row);
+        if cell.width == 0 {
+            continue; // wide-char continuation cell
+        }
+        let span = cell.width.max(1) as i32;
+
+        // Cell box in canvas pixels (cell_w/cell_h are whole pixels).
+        let x0 = (origin.0 + col as f32 * metrics.cell_w) as i32;
+        let y0 = (origin.1 + row as f32 * metrics.cell_h) as i32;
+        let x1 = x0 + span * metrics.cell_w as i32;
+        let y1 = y0 + metrics.cell_h as i32;
+
+        let (fg, bg) = cell_colors(cell, theme);
+        let is_cursor = cursor_visible
+            && snap.cursor.visible
+            && snap.cursor.row == row
+            && snap.cursor.col == col;
+
+        // Background rect; a visible block cursor paints the whole cell
+        // in the cursor color and inverts the glyph to the terminal
+        // background.
+        let ink = if is_cursor {
+            fill_rect_clipped(canvas, x0, y0, x1, y1, theme.cursor, clip);
+            theme.background
+        } else {
+            if bg != theme.background {
+                fill_rect_clipped(canvas, x0, y0, x1, y1, bg, clip);
+            }
+            fg
+        };
+
+        // Glyph (skip blanks); wide glyphs may spill into their
+        // continuation cell but no further.
+        if cell.ch != ' ' && cell.ch != '\0' {
+            let clip_x = if cell.width == 2 {
+                Some((x0, x1))
+            } else {
+                None
+            };
+            draw_glyph(
+                canvas,
+                fonts,
+                cell.ch,
+                cell.attrs.bold,
+                cell.attrs.italic,
+                x0,
+                y0 + metrics.baseline as i32,
+                ink,
+                clip_x,
+                clip,
+            );
+        }
+
+        // Decorations.
+        if cell.attrs.underline {
+            let uy = y0 + metrics.underline_y as i32;
+            fill_rect_clipped(canvas, x0, uy, x1, (uy + line_thickness).min(y1), ink, clip);
+        }
+        if cell.attrs.strikethrough {
+            let sy = y0 + metrics.strikeout_y as i32;
+            fill_rect_clipped(canvas, x0, sy, x1, sy + line_thickness, ink, clip);
+        }
+    }
+}
+
+/// Pixel bounding box `(x0, x1, y0, y1)` (half-open) of everything
+/// [`draw_row`] can paint for `row`: the cell strip itself, glyph overhang
+/// (italic slant sideways, ascenders/descenders past the cell box — the grid
+/// never clips those vertically), and the unclamped strikethrough stroke.
+/// Conservative (uses glyph bitmap boxes, not inked pixels), which only ever
+/// enlarges the damage region. Rasterizes glyphs through the cache.
+pub(crate) fn row_draw_extent(
+    snap: &GridSnapshot,
+    fonts: &mut FontSet,
+    metrics: &Metrics,
+    origin: (f32, f32),
+    row: usize,
+) -> (i32, i32, i32, i32) {
+    let y0 = (origin.1 + row as f32 * metrics.cell_h) as i32;
+    let y1 = y0 + metrics.cell_h as i32;
+    let baseline_y = y0 + metrics.baseline as i32;
+    let line_thickness = metrics.line_thickness as i32;
+    let mut ext = (
+        origin.0 as i32,
+        (origin.0 + snap.cols as f32 * metrics.cell_w) as i32,
+        y0,
+        y1,
+    );
+
+    for col in 0..snap.cols {
+        let cell = snap.cell(col, row);
+        if cell.width == 0 {
+            continue;
+        }
+        let span = cell.width.max(1) as i32;
+        let x0 = (origin.0 + col as f32 * metrics.cell_w) as i32;
+        let x1 = x0 + span * metrics.cell_w as i32;
+
+        if cell.ch != ' ' && cell.ch != '\0' {
+            let g = fonts.glyph(cell.ch, cell.attrs.bold, cell.attrs.italic);
+            let (gh, gw) = (g.metrics.height as i32, g.metrics.width as i32);
+            let mut gx0 = x0 + g.metrics.xmin;
+            let mut gx1 = gx0 + gw;
+            if cell.width == 2 {
+                gx0 = gx0.max(x0);
+                gx1 = gx1.min(x1);
+            }
+            let gy0 = baseline_y - (g.metrics.ymin + gh);
+            let gy1 = baseline_y - g.metrics.ymin;
+            if gx0 < gx1 && gy0 < gy1 {
+                ext.0 = ext.0.min(gx0);
+                ext.1 = ext.1.max(gx1);
+                ext.2 = ext.2.min(gy0);
+                ext.3 = ext.3.max(gy1);
+            }
+        }
+        // Underline is clamped inside the cell box by draw_row; the
+        // strikethrough stroke is not.
+        if cell.attrs.strikethrough {
+            let sy = y0 + metrics.strikeout_y as i32;
+            ext.2 = ext.2.min(sy);
+            ext.3 = ext.3.max(sy + line_thickness);
+        }
+    }
+    ext
 }
 
 /// Draws the full snapshot grid with its top-left corner at `origin`.
@@ -80,72 +269,18 @@ pub fn draw_grid(
     origin: (f32, f32),
     cursor_visible: bool,
 ) {
-    let line_thickness = metrics.line_thickness as i32;
-
     for row in 0..snap.rows {
-        for col in 0..snap.cols {
-            let cell = snap.cell(col, row);
-            if cell.width == 0 {
-                continue; // wide-char continuation cell
-            }
-            let span = cell.width.max(1) as i32;
-
-            // Cell box in canvas pixels (cell_w/cell_h are whole pixels).
-            let x0 = (origin.0 + col as f32 * metrics.cell_w) as i32;
-            let y0 = (origin.1 + row as f32 * metrics.cell_h) as i32;
-            let x1 = x0 + span * metrics.cell_w as i32;
-            let y1 = y0 + metrics.cell_h as i32;
-
-            let (fg, bg) = cell_colors(cell, theme);
-            let is_cursor = cursor_visible
-                && snap.cursor.visible
-                && snap.cursor.row == row
-                && snap.cursor.col == col;
-
-            // Background rect; a visible block cursor paints the whole cell
-            // in the cursor color and inverts the glyph to the terminal
-            // background.
-            let ink = if is_cursor {
-                canvas.fill_rect(x0, y0, x1, y1, theme.cursor);
-                theme.background
-            } else {
-                if bg != theme.background {
-                    canvas.fill_rect(x0, y0, x1, y1, bg);
-                }
-                fg
-            };
-
-            // Glyph (skip blanks); wide glyphs may spill into their
-            // continuation cell but no further.
-            if cell.ch != ' ' && cell.ch != '\0' {
-                let clip = if cell.width == 2 {
-                    Some((x0, x1))
-                } else {
-                    None
-                };
-                draw_glyph(
-                    canvas,
-                    fonts,
-                    cell.ch,
-                    cell.attrs.bold,
-                    cell.attrs.italic,
-                    x0,
-                    y0 + metrics.baseline as i32,
-                    ink,
-                    clip,
-                );
-            }
-
-            // Decorations.
-            if cell.attrs.underline {
-                let uy = y0 + metrics.underline_y as i32;
-                canvas.fill_rect(x0, uy, x1, (uy + line_thickness).min(y1), ink);
-            }
-            if cell.attrs.strikethrough {
-                let sy = y0 + metrics.strikeout_y as i32;
-                canvas.fill_rect(x0, sy, x1, sy + line_thickness, ink);
-            }
-        }
+        draw_row(
+            canvas,
+            snap,
+            theme,
+            fonts,
+            metrics,
+            origin,
+            cursor_visible,
+            row,
+            None,
+        );
     }
 }
 

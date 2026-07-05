@@ -705,22 +705,38 @@ fn encode_gif(
     let mut theme_idx = 0;
     let mut visible = true;
     let blink = settings.cursor_blink;
-    // Time + grid of the last pushed frame; blink frames synthesized from it.
-    let mut last_frame: Option<(Duration, crate::snapshot::GridSnapshot)> = None;
+    // Double-buffered snapshots: `last_snap` is the grid of the last pushed
+    // frame (valid while `last_time` is `Some`; blink frames synthesize from
+    // it), `scratch` receives the next snapshot, and the two swap after each
+    // push — so per-event snapshotting allocates nothing at steady state.
+    let empty_snap = || crate::snapshot::GridSnapshot {
+        cols: 0,
+        rows: 0,
+        cells: Vec::new(),
+        cursor: crate::snapshot::Cursor {
+            col: 0,
+            row: 0,
+            visible: false,
+        },
+    };
+    let mut last_snap = empty_snap();
+    let mut scratch = empty_snap();
+    let mut last_time: Option<Duration> = None;
 
     // Renders idle-gap blink toggles between the last frame and `until`.
     let synth = |renderer: &mut Renderer,
                  enc: &mut gif::GifEncoder,
-                 last: &Option<(Duration, crate::snapshot::GridSnapshot)>,
+                 last: Option<Duration>,
+                 snap: &crate::snapshot::GridSnapshot,
                  until: Duration|
      -> std::io::Result<()> {
-        let Some((since, snap)) = last else {
+        let Some(since) = last else {
             return Ok(());
         };
-        if !snap.cursor.visible || until.saturating_sub(*since) > BLINK_MAX_GAP {
+        if !snap.cursor.visible || until.saturating_sub(since) > BLINK_MAX_GAP {
             return Ok(());
         }
-        for (t, on) in blink_frames(*since, until, BLINK_HALF_PERIOD) {
+        for (t, on) in blink_frames(since, until, BLINK_HALF_PERIOD) {
             let canvas = renderer.render_frame(snap, on);
             enc.push_frame(t, &canvas.buf)?;
         }
@@ -737,26 +753,27 @@ fn encode_gif(
         match &ev.kind {
             SessionEventKind::Output(s) => {
                 if visible && blink {
-                    synth(renderer, &mut enc, &last_frame, ev.time)?;
+                    synth(renderer, &mut enc, last_time, &last_snap, ev.time)?;
                 }
                 term.feed(s);
                 if visible {
-                    let snap = term.snapshot();
+                    term.snapshot_into(&mut scratch);
                     let cursor_on = !blink || blink_phase_on(ev.time, BLINK_HALF_PERIOD);
-                    let canvas = renderer.render_frame(&snap, cursor_on);
+                    let canvas = renderer.render_frame(&scratch, cursor_on);
                     enc.push_frame(ev.time, &canvas.buf)?;
-                    last_frame = Some((ev.time, snap));
+                    std::mem::swap(&mut last_snap, &mut scratch);
+                    last_time = Some(ev.time);
                 }
             }
             SessionEventKind::Resize(c, r) => {
                 term.resize(*c, *r);
-                last_frame = None; // stale grid; don't synthesize from it
+                last_time = None; // stale grid; don't synthesize from it
             }
             SessionEventKind::Visibility(v) => visible = *v,
             SessionEventKind::Exit => {
                 // Blink through the trailing idle gap before the child exits.
                 if visible && blink {
-                    synth(renderer, &mut enc, &last_frame, ev.time)?;
+                    synth(renderer, &mut enc, last_time, &last_snap, ev.time)?;
                 }
                 break;
             }
@@ -765,8 +782,8 @@ fn encode_gif(
 
     // The held final frame must end cursor-visible: re-push the last grid
     // with the cursor on (coalesces if the pending frame already shows it).
-    if blink && let Some((_, snap)) = &last_frame {
-        let canvas = renderer.render_frame(snap, true);
+    if blink && last_time.is_some() {
+        let canvas = renderer.render_frame(&last_snap, true);
         enc.push_frame(end_time, &canvas.buf)?;
     }
 
@@ -1038,6 +1055,81 @@ mod tests {
         SessionEvent {
             time: Duration::ZERO,
             kind: SessionEventKind::Output(s.into()),
+        }
+    }
+
+    /// Replaying the same event log twice must produce byte-identical GIFs,
+    /// and the file's structure (dimensions, frame count, delays) must match
+    /// what the blink/coalescing rules predict independently.
+    #[test]
+    fn encode_gif_replay_is_deterministic() {
+        let at = |ms: u64, kind: SessionEventKind| SessionEvent {
+            time: Duration::from_millis(ms),
+            kind,
+        };
+        // Blink half-period is 530ms: the 100→700ms gap synthesizes an
+        // off-frame at 530, the 700→1200 gap an on-frame at 1060; the final
+        // cursor-on re-push at 1200 is identical to the pending frame at
+        // 1060 and coalesces.
+        let events = vec![
+            at(0, SessionEventKind::Output("hello".into())),
+            at(100, SessionEventKind::Output("x".into())),
+            at(700, SessionEventKind::Output("y".into())),
+            at(1200, SessionEventKind::Exit),
+        ];
+
+        let settings = Settings {
+            render: RenderOptions {
+                width: 200,
+                height: 100,
+                padding: 10,
+                font_size: 16.0,
+                ..RenderOptions::default()
+            },
+            ..Settings::default()
+        };
+        let mut renderer = Renderer::new(settings.render.clone(), settings.theme.clone());
+
+        let path = |run: usize| {
+            std::env::temp_dir().join(format!(
+                "vhs_rs-eval-gif-determinism-{}-{run}.gif",
+                std::process::id()
+            ))
+        };
+        for run in 0..2 {
+            encode_gif(
+                path(run).to_str().unwrap(),
+                &settings,
+                &mut renderer,
+                &events,
+                (16, 5),
+                settings.theme.clone(),
+                &[],
+            )
+            .unwrap();
+        }
+        let bytes0 = std::fs::read(path(0)).unwrap();
+        let bytes1 = std::fs::read(path(1)).unwrap();
+        assert_eq!(bytes0, bytes1, "two replays produced different files");
+
+        // Structure: frames at 0/100/530/700/1060 written (the 1200 re-push
+        // coalesces), delays = successor gaps in centiseconds + 1s hold.
+        // `::gif` is the external decoder crate (the local `gif` name is the
+        // encoder module imported above).
+        let mut options = ::gif::DecodeOptions::new();
+        options.set_color_output(::gif::ColorOutput::RGBA);
+        let mut decoder = options
+            .read_info(std::fs::File::open(path(0)).unwrap())
+            .unwrap();
+        assert_eq!((decoder.width(), decoder.height()), (200, 100));
+        let mut delays = Vec::new();
+        while let Some(frame) = decoder.read_next_frame().unwrap() {
+            delays.push(frame.delay);
+        }
+        assert_eq!(delays, vec![10, 43, 17, 36, 100]);
+
+        for run in 0..2 {
+            std::fs::remove_file(path(run)).ok();
         }
     }
 

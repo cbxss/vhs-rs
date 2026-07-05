@@ -200,6 +200,9 @@ pub struct GifEncoder {
     /// `Frame::from_rgba_speed` consumes/overwrites its input buffer, so
     /// pixels are copied here before quantization.
     scratch: Vec<u8>,
+    /// Recycled buffer of the last written pending frame; the next pending
+    /// frame copies into it, so steady state allocates nothing per push.
+    spare: Vec<u8>,
     /// Fractional centiseconds owed to the next written delay.
     delay_error: f64,
     frames_written: usize,
@@ -323,6 +326,7 @@ impl GifEncoder {
             opts,
             pending: None,
             scratch: Vec::new(),
+            spare: Vec::new(),
             delay_error: 0.0,
             frames_written: 0,
             frames_coalesced: 0,
@@ -356,9 +360,12 @@ impl GifEncoder {
         }
 
         let Some(pending) = self.pending.as_mut() else {
+            let mut buf = std::mem::take(&mut self.spare);
+            buf.clear();
+            buf.extend_from_slice(rgba);
             self.pending = Some(PendingFrame {
                 timestamp,
-                rgba: rgba.to_vec(),
+                rgba: buf,
             });
             return Ok(());
         };
@@ -381,11 +388,16 @@ impl GifEncoder {
         }
 
         // Successor arrived: write the pending frame with the real delay.
+        // write_pending recycles the written buffer into self.spare, which
+        // the new pending frame reuses.
         let dt = timestamp - pending.timestamp;
         self.write_pending(dt)?;
+        let mut buf = std::mem::take(&mut self.spare);
+        buf.clear();
+        buf.extend_from_slice(rgba);
         self.pending = Some(PendingFrame {
             timestamp,
-            rgba: rgba.to_vec(),
+            rgba: buf,
         });
 
         Ok(())
@@ -464,6 +476,8 @@ impl GifEncoder {
         let delay_cs = (rounded as i64).clamp(2, u16::MAX as i64) as u16;
 
         self.encode_frame(&pending.rgba, delay_cs)?;
+        // Recycle the flushed buffer for the next pending frame.
+        self.spare = pending.rgba;
 
         self.frames_written += 1;
         self.total_delay_cs += delay_cs as u64;
