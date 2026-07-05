@@ -65,7 +65,7 @@ fi
 
 tar -xzf "$tmp/$asset" -C "$tmp"
 mkdir -p "$INSTALL_DIR"
-install -m 755 "$tmp/vhs-rs" "$INSTALL_DIR/vhs-rs"
+install -m 755 "$tmp/vhs-rs-$target/vhs-rs" "$INSTALL_DIR/vhs-rs"
 
 say "installed $("$INSTALL_DIR/vhs-rs" --version) to $INSTALL_DIR/vhs-rs"
 case ":$PATH:" in
