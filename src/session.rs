@@ -10,18 +10,11 @@
 //!   `WouldBlock`).
 //! - [`Session::wait_change`] — await the next output chunk (or child EOF)
 //!   with a deadline; this powers event-driven `Wait` with zero polling.
-//! - [`Session::pump`] — one non-greedy step: drain what's available, else
-//!   yield to the reactor once with a zero timeout.
 //!
-//! Because all reads happen on the evaluator's task there are no locks; the
-//! `watch` generation channel exists so auxiliary observers (progress UIs,
-//! future streaming encoders) can be notified of state changes via
-//! [`Session::subscribe`].
+//! Because all reads happen on the evaluator's task there are no locks.
 
 use std::io;
 use std::time::{Duration, Instant};
-
-use tokio::sync::watch;
 
 use crate::pty::{ExitStatus, Pty};
 use crate::snapshot::{SessionEvent, SessionEventKind};
@@ -84,8 +77,6 @@ pub struct Session {
     events: Vec<SessionEvent>,
     start: Instant,
     decoder: Utf8Decoder,
-    generation: u64,
-    gen_tx: watch::Sender<u64>,
     exited: bool,
 }
 
@@ -99,7 +90,6 @@ impl Session {
         rows: usize,
     ) -> io::Result<Session> {
         let pty = Pty::spawn(command, env, (cols as u16, rows as u16))?;
-        let (gen_tx, _) = watch::channel(0);
 
         Ok(Session {
             pty,
@@ -107,8 +97,6 @@ impl Session {
             events: Vec::new(),
             start: Instant::now(),
             decoder: Utf8Decoder::new(),
-            generation: 0,
-            gen_tx,
             exited: false,
         })
     }
@@ -165,17 +153,6 @@ impl Session {
         }
     }
 
-    /// One pump step: drain available output; if nothing was pending, poll
-    /// the PTY once through the reactor (zero timeout) so an in-flight chunk
-    /// still lands. Returns `true` if state changed.
-    pub async fn pump(&mut self) -> io::Result<bool> {
-        if self.drain()? {
-            return Ok(true);
-        }
-
-        self.wait_change(Duration::ZERO).await
-    }
-
     /// Writes raw bytes (keystrokes) to the child's input.
     pub async fn write(&self, bytes: &[u8]) -> io::Result<()> {
         self.pty.write_all(bytes).await
@@ -208,11 +185,6 @@ impl Session {
         self.exited
     }
 
-    /// Nonblocking child exit check (reaps on success); see [`Pty::try_wait`].
-    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        self.pty.try_wait()
-    }
-
     /// Graceful teardown: drains pending output, then SIGTERM → SIGKILL and
     /// reaps the child. Records the Exit event.
     pub async fn shutdown(&mut self) -> io::Result<Option<ExitStatus>> {
@@ -231,11 +203,6 @@ impl Session {
     /// The recorded event log (replayed at encode time).
     pub fn events(&self) -> &[SessionEvent] {
         &self.events
-    }
-
-    /// A receiver on the generation counter; bumped on every state change.
-    pub fn subscribe(&self) -> watch::Receiver<u64> {
-        self.gen_tx.subscribe()
     }
 
     /// Time since the session started.
@@ -266,9 +233,6 @@ impl Session {
             time: self.start.elapsed(),
             kind,
         });
-
-        self.generation += 1;
-        let _ = self.gen_tx.send(self.generation);
     }
 }
 
@@ -366,25 +330,6 @@ mod tests {
             .unwrap();
         assert!(!changed);
         assert!(!session.exited());
-    }
-
-    #[tokio::test]
-    async fn generation_counter_bumps_on_output() {
-        let mut session =
-            Session::spawn(&cmd(&["/bin/sh", "-c", "printf hi"]), &[], 80, 24).unwrap();
-        let rx = session.subscribe();
-        assert_eq!(*rx.borrow(), 0);
-
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !session.term().text().contains("hi") {
-            assert!(Instant::now() < deadline, "timed out");
-            session
-                .wait_change(Duration::from_millis(250))
-                .await
-                .unwrap();
-        }
-
-        assert!(*rx.borrow() > 0);
     }
 
     #[tokio::test]

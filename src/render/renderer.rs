@@ -80,11 +80,9 @@ impl Canvas {
             self.buf[i..i + 4].copy_from_slice(&[c.0, c.1, c.2, 0xff]);
             return;
         }
-        let blend = |old: u8, new: u8| (old as f32 + (new as f32 - old as f32) * a).round() as u8;
-        self.buf[i] = blend(self.buf[i], c.0);
-        self.buf[i + 1] = blend(self.buf[i + 1], c.1);
-        self.buf[i + 2] = blend(self.buf[i + 2], c.2);
-        self.buf[i + 3] = 0xff;
+        let old = Rgb(self.buf[i], self.buf[i + 1], self.buf[i + 2]);
+        let new = old.lerp(c, a);
+        self.buf[i..i + 4].copy_from_slice(&[new.0, new.1, new.2, 0xff]);
     }
 }
 

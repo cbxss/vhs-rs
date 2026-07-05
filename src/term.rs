@@ -57,6 +57,17 @@ impl Term {
         self.vt.cursor_key_app_mode()
     }
 
+    /// The cursor position and visibility, without building a grid snapshot.
+    pub fn cursor(&self) -> Cursor {
+        let cursor = self.vt.cursor();
+
+        Cursor {
+            col: cursor.col,
+            row: cursor.row,
+            visible: cursor.visible,
+        }
+    }
+
     /// An immutable snapshot of the visible screen in crate boundary types.
     ///
     /// Wide characters keep avt's occupancy convention: the leading cell has
@@ -71,17 +82,11 @@ impl Term {
             }
         }
 
-        let cursor = self.vt.cursor();
-
         GridSnapshot {
             cols,
             rows,
             cells,
-            cursor: Cursor {
-                col: cursor.col,
-                row: cursor.row,
-                visible: cursor.visible,
-            },
+            cursor: self.cursor(),
         }
     }
 

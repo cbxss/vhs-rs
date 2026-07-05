@@ -162,37 +162,6 @@ pub fn wheel_bytes(up: bool, col: usize, row: usize) -> Vec<u8> {
     format!("\x1b[<{button};{};{}M", col + 1, row + 1).into_bytes()
 }
 
-/// Scans a raw output chunk for DECCKM set/reset (`\x1b[?1h` / `\x1b[?1l`)
-/// and returns the updated application-cursor-keys mode. The last occurrence
-/// wins; `current` is returned unchanged if neither appears.
-///
-/// Note: [`crate::term::Term::application_cursor`] (backed by avt's parser)
-/// is boundary-safe and preferred when a `Term` has seen the bytes; this scan
-/// is a raw-bytes fallback.
-pub fn decckm_scan(bytes: &[u8], current: bool) -> bool {
-    const SET: &[u8] = b"\x1b[?1h";
-    const RESET: &[u8] = b"\x1b[?1l";
-
-    let mut mode = current;
-    let mut i = 0;
-
-    while i + SET.len() <= bytes.len() {
-        let window = &bytes[i..i + SET.len()];
-
-        if window == SET {
-            mode = true;
-            i += SET.len();
-        } else if window == RESET {
-            mode = false;
-            i += RESET.len();
-        } else {
-            i += 1;
-        }
-    }
-
-    mode
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,36 +337,6 @@ mod tests {
                 wheel_bytes(up, col, row),
                 expected,
                 "up={up} col={col} row={row}"
-            );
-        }
-    }
-
-    #[test]
-    fn decckm_scanning() {
-        // (chunk, initial mode, expected mode)
-        let cases: &[(&[u8], bool, bool)] = &[
-            (b"", false, false),
-            (b"", true, true),
-            (b"plain output", false, false),
-            (b"plain output", true, true),
-            (b"\x1b[?1h", false, true),
-            (b"\x1b[?1l", true, false),
-            (b"before\x1b[?1hafter", false, true),
-            (b"\x1b[?1h...\x1b[?1l", true, false),
-            (b"\x1b[?1l...\x1b[?1h", false, true),
-            // Similar-but-different sequences must not trigger.
-            (b"\x1b[?1049h", false, false), // alt screen
-            (b"\x1b[?12h", false, false),   // cursor blink
-            (b"\x1b[?25h", true, true),     // show cursor
-            (b"\x1b[1h", false, false),     // non-private mode
-        ];
-
-        for &(bytes, current, expected) in cases {
-            assert_eq!(
-                decckm_scan(bytes, current),
-                expected,
-                "bytes {} current {current}",
-                bytes.escape_ascii()
             );
         }
     }

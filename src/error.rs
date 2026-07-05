@@ -17,6 +17,20 @@ pub enum ExitKind {
     Runtime = 4,
 }
 
+impl ExitKind {
+    /// Machine-stable reason string, used both as the report `status` and as
+    /// the failure `reason` — the single source of truth for the taxonomy.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            ExitKind::Success => "success",
+            ExitKind::AssertFailed => "assert_failed",
+            ExitKind::Parse => "parse_error",
+            ExitKind::WaitTimeout => "wait_timeout",
+            ExitKind::Runtime => "runtime_error",
+        }
+    }
+}
+
 /// A parse or validation error anchored to a source token.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {

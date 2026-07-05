@@ -1,6 +1,20 @@
 //! Small shared utilities.
 
+use std::fs;
+use std::io;
+use std::path::Path;
 use std::time::Duration;
+
+/// Creates `path`'s parent directories as needed (a no-op for bare
+/// filenames).
+pub fn ensure_parent(path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
 
 /// Parses a tape duration literal: a decimal number with an optional
 /// `ms`/`s`/`m` suffix (no suffix means seconds, matching VHS).

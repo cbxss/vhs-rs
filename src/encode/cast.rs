@@ -14,6 +14,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::snapshot::{SessionEvent, SessionEventKind};
+use crate::util::ensure_parent;
 
 /// Session metadata for the asciicast header.
 #[derive(Debug, Clone, Default)]
@@ -98,11 +99,7 @@ fn format_interval(micros: u128) -> String {
 /// event. `Visibility` events are skipped; time between written events is
 /// preserved.
 pub fn write_cast(path: &Path, meta: &CastMeta, events: &[SessionEvent]) -> io::Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
+    ensure_parent(path)?;
 
     let mut out = BufWriter::new(fs::File::create(path)?);
     out.write_all(header_line(meta).as_bytes())?;

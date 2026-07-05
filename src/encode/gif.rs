@@ -47,6 +47,8 @@ use std::time::Duration;
 
 use gif::{DisposalMethod, Encoder, Frame, Repeat};
 
+use crate::util::ensure_parent;
+
 /// Cap on buffered indexed pixel data. Beyond this the encoder falls back to
 /// streaming with per-frame local palettes rather than growing memory
 /// unboundedly on very long recordings.
@@ -215,6 +217,11 @@ fn to_io(e: gif::EncodingError) -> io::Error {
     }
 }
 
+/// The error every operation returns once the sink is [`Sink::Poisoned`].
+fn poisoned_err() -> io::Error {
+    io::Error::other("gif encoder unusable after an earlier write failure")
+}
+
 /// Bounding box `(left, top, width, height)` of pixels that differ between
 /// two equal-sized buffers of `bpp`-byte pixels, or `None` if identical.
 fn diff_rect(
@@ -303,11 +310,7 @@ impl GifEncoder {
     /// is written lazily — see module docs on the global-palette strategy —
     /// but the file itself is created (and truncated) immediately.
     pub fn create(path: &Path, opts: GifOptions) -> io::Result<Self> {
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent)?;
-        }
+        ensure_parent(path)?;
 
         let writer = BufWriter::new(File::create(path)?);
 
@@ -433,11 +436,7 @@ impl GifEncoder {
                 }
                 (encoder.into_inner()?, PaletteMode::PerFrame)
             }
-            Sink::Poisoned => {
-                return Err(io::Error::other(
-                    "gif encoder unusable after an earlier write failure",
-                ));
-            }
+            Sink::Poisoned => return Err(poisoned_err()),
         };
         writer.flush()?;
 
@@ -502,9 +501,7 @@ impl GifEncoder {
             frames,
         } = std::mem::replace(&mut self.sink, Sink::Poisoned)
         else {
-            return Err(io::Error::other(
-                "gif encoder unusable after an earlier write failure",
-            ));
+            return Err(poisoned_err());
         };
 
         let mut encoder =
@@ -579,9 +576,7 @@ impl GifEncoder {
             encoder, prev_rgba, ..
         } = &mut self.sink
         else {
-            return Err(io::Error::other(
-                "gif encoder unusable after an earlier write failure",
-            ));
+            return Err(poisoned_err());
         };
 
         let region = dirty_region(prev_rgba.as_deref(), rgba, width, height, 4);

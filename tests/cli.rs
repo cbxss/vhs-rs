@@ -4,6 +4,9 @@
 use std::io::Write as _;
 use std::process::{Command, Output, Stdio};
 
+mod common;
+use common::TempTape;
+
 const OK_TAPE: &str = "Output demo.gif\nType \"echo hi\"\nEnter\nWait\n";
 const BAD_TAPE: &str = "Foo\nSleep Bar\n";
 
@@ -29,32 +32,12 @@ fn run_with_stdin(args: &[&str], stdin: &str) -> Output {
     child.wait_with_output().expect("wait for vhs_rs")
 }
 
-/// RAII temp tape file with a unique absolute path.
-struct TempTape(std::path::PathBuf);
-
-impl TempTape {
-    fn new(tag: &str, contents: &str) -> Self {
-        let path =
-            std::env::temp_dir().join(format!("vhs_rs_cli_test_{}_{tag}.tape", std::process::id()));
-        std::fs::write(&path, contents).expect("write temp tape");
-        TempTape(path)
-    }
-
-    fn path(&self) -> &str {
-        self.0.to_str().expect("utf-8 temp path")
-    }
-}
-
-impl Drop for TempTape {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 #[test]
 fn check_ok_tape_exits_zero() {
     let tape = TempTape::new("check_ok", OK_TAPE);
-    let out = vhs_rs(&["check", tape.path()]).output().expect("run vhs_rs");
+    let out = vhs_rs(&["check", tape.path()])
+        .output()
+        .expect("run vhs_rs");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         out.status.code(),
@@ -68,7 +51,9 @@ fn check_ok_tape_exits_zero() {
 #[test]
 fn check_bad_tape_exits_two_with_caret_errors() {
     let tape = TempTape::new("check_bad", BAD_TAPE);
-    let out = vhs_rs(&["check", tape.path()]).output().expect("run vhs_rs");
+    let out = vhs_rs(&["check", tape.path()])
+        .output()
+        .expect("run vhs_rs");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2));
     assert!(

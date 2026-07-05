@@ -7,6 +7,9 @@ use vhs_rs::parser::{Parser, validate};
 use vhs_rs::token::TokenType;
 use vhs_rs::{command::Command, parse_tape};
 
+mod common;
+use common::TempTape;
+
 use TokenType::*;
 
 fn assert_tokens(input: &str, expected: &[(TokenType, &str)]) {
@@ -742,33 +745,6 @@ fn test_parse_ctrl() {
 /// RAII temp tape file with a unique absolute path under the OS temp dir,
 /// so parallel test runs never collide (the Go tests used cwd-relative
 /// "source.tape", which does).
-struct TempTape(std::path::PathBuf);
-
-impl TempTape {
-    fn new(tag: &str, ext: &str, contents: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "vhs_rs_test_{}_{}_{tag}.{ext}",
-            std::process::id(),
-            std::thread::current()
-                .name()
-                .unwrap_or("t")
-                .replace("::", "_"),
-        ));
-        std::fs::write(&path, contents).expect("write temp tape");
-        TempTape(path)
-    }
-
-    fn path(&self) -> std::string::String {
-        self.0.to_string_lossy().into_owned()
-    }
-}
-
-impl Drop for TempTape {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 fn parse_errors_of(tape: &str) -> Vec<vhs_rs::error::ParseError> {
     let mut p = Parser::new(tape);
     let _ = p.parse();
@@ -778,7 +754,7 @@ fn parse_errors_of(tape: &str) -> Vec<vhs_rs::error::ParseError> {
 /// Port of TestParseSource (vhs/parser/parser_test.go).
 #[test]
 fn test_parse_source_ok() {
-    let src = TempTape::new("src_ok", "tape", "Type \"echo 'Welcome to VHS!'\"");
+    let src = TempTape::new("src_ok", "Type \"echo 'Welcome to VHS!'\"");
     let tape = format!("Source \"{}\"", src.path());
 
     let mut p = Parser::new(&tape);
@@ -808,7 +784,7 @@ fn test_parse_source_not_found() {
 
 #[test]
 fn test_parse_source_wrong_extension() {
-    let src = TempTape::new("src_ext", "vhs", "Type \"echo 'Welcome to VHS!'\"");
+    let src = TempTape::with_ext("src_ext", "vhs", "Type \"echo 'Welcome to VHS!'\"");
     let errors = parse_errors_of(&format!("Source \"{}\"", src.path()));
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].msg, "Expected file with .tape extension");
@@ -825,7 +801,6 @@ fn test_parse_source_missing_path() {
 fn test_parse_source_nested() {
     let src = TempTape::new(
         "src_nested",
-        "tape",
         "Type \"echo 'Welcome to VHS!'\"\nSource magic.tape\nType \"goodbye\"\n",
     );
     let errors = parse_errors_of(&format!("Source \"{}\"", src.path()));

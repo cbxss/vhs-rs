@@ -5,6 +5,7 @@
 //! bold/italic), which keeps the embedded payload small compared to shipping
 //! four fully patched Nerd Font variants.
 
+use std::cell::OnceCell;
 use std::collections::HashMap;
 
 use fontdue::{Font, FontSettings};
@@ -38,32 +39,41 @@ pub struct Metrics {
     pub baseline: f32,
     pub underline_y: f32,
     pub strikeout_y: f32,
+    /// Underline/strikethrough thickness in whole pixels (at least 1).
+    pub line_thickness: f32,
     /// The pixel size the fonts are rasterized at.
     pub px: f32,
 }
 
 /// The four embedded JetBrains Mono variants, the symbols fallback font, and
 /// a glyph cache, all at one fixed pixel size.
+///
+/// Only the regular variant is parsed eagerly (metrics need it); the other
+/// variants and the symbols font parse lazily on first use, so runs that
+/// never rasterize styled text (or never rasterize at all) skip the cost.
 pub struct FontSet {
-    fonts: [Font; 4],
-    symbols: Font,
+    regular: Font,
+    bold: OnceCell<Font>,
+    italic: OnceCell<Font>,
+    bold_italic: OnceCell<Font>,
+    symbols: OnceCell<Font>,
     px: f32,
     cache: HashMap<(char, bool, bool), CachedGlyph>,
 }
 
-fn variant_index(bold: bool, italic: bool) -> usize {
-    (bold as usize) | ((italic as usize) << 1)
+fn load(bytes: &[u8]) -> Font {
+    Font::from_bytes(bytes, FontSettings::default()).expect("embedded font must parse")
 }
 
 impl FontSet {
     /// Loads the embedded fonts for rasterization at `px` pixels.
     pub fn new(px: f32) -> FontSet {
-        let load = |bytes: &[u8]| {
-            Font::from_bytes(bytes, FontSettings::default()).expect("embedded font must parse")
-        };
         FontSet {
-            fonts: [load(REGULAR), load(BOLD), load(ITALIC), load(BOLD_ITALIC)],
-            symbols: load(SYMBOLS),
+            regular: load(REGULAR),
+            bold: OnceCell::new(),
+            italic: OnceCell::new(),
+            bold_italic: OnceCell::new(),
+            symbols: OnceCell::new(),
             px,
             cache: HashMap::new(),
         }
@@ -73,9 +83,19 @@ impl FontSet {
         self.px
     }
 
-    /// The font for an attribute combination.
+    /// The font for an attribute combination (parsed on first use).
     pub fn pick(&self, bold: bool, italic: bool) -> &Font {
-        &self.fonts[variant_index(bold, italic)]
+        match (bold, italic) {
+            (false, false) => &self.regular,
+            (true, false) => self.bold.get_or_init(|| load(BOLD)),
+            (false, true) => self.italic.get_or_init(|| load(ITALIC)),
+            (true, true) => self.bold_italic.get_or_init(|| load(BOLD_ITALIC)),
+        }
+    }
+
+    /// The symbols fallback font (parsed on first use).
+    fn symbols(&self) -> &Font {
+        self.symbols.get_or_init(|| load(SYMBOLS))
     }
 
     /// Computes grid metrics from the regular variant.
@@ -102,6 +122,7 @@ impl FontSet {
             baseline,
             underline_y,
             strikeout_y,
+            line_thickness,
             px: self.px,
         }
     }
@@ -116,18 +137,21 @@ impl FontSet {
     pub fn glyph(&mut self, ch: char, bold: bool, italic: bool) -> &CachedGlyph {
         let key = (ch, bold, italic);
         if !self.cache.contains_key(&key) {
-            let main = &self.fonts[variant_index(bold, italic)];
-            let (font, drawn) = if main.lookup_glyph_index(ch) != 0 {
-                (main, ch)
-            } else if self.symbols.lookup_glyph_index(ch) != 0 {
-                (&self.symbols, ch)
-            } else if main.lookup_glyph_index(REPLACEMENT) != 0 {
-                (main, REPLACEMENT)
-            } else {
-                (main, ' ')
+            let entry = {
+                let main = self.pick(bold, italic);
+                let (font, drawn) = if main.lookup_glyph_index(ch) != 0 {
+                    (main, ch)
+                } else if self.symbols().lookup_glyph_index(ch) != 0 {
+                    (self.symbols(), ch)
+                } else if main.lookup_glyph_index(REPLACEMENT) != 0 {
+                    (main, REPLACEMENT)
+                } else {
+                    (main, ' ')
+                };
+                let (metrics, bitmap) = font.rasterize(drawn, self.px);
+                CachedGlyph { metrics, bitmap }
             };
-            let (metrics, bitmap) = font.rasterize(drawn, self.px);
-            self.cache.insert(key, CachedGlyph { metrics, bitmap });
+            self.cache.insert(key, entry);
         }
         &self.cache[&key]
     }
@@ -187,7 +211,7 @@ mod tests {
             );
         }
         assert_ne!(
-            fonts.symbols.lookup_glyph_index('\u{E718}'),
+            fonts.symbols().lookup_glyph_index('\u{E718}'),
             0,
             "U+E718 missing from the symbols font"
         );

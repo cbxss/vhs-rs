@@ -9,6 +9,7 @@ use std::io::Read as _;
 
 use clap::{Args, Parser, Subcommand};
 
+use crate::command::Command;
 use crate::error::{ExitKind, ParseError, render_parse_errors};
 
 const EXIT_CODES_HELP: &str = "\
@@ -98,7 +99,8 @@ fn read_tape(path: &str) -> Result<String, String> {
             .map_err(|e| format!("vhs-rs: failed to read tape from stdin: {e}"))?;
         Ok(buf)
     } else {
-        std::fs::read_to_string(path).map_err(|e| format!("vhs-rs: failed to read tape {path}: {e}"))
+        std::fs::read_to_string(path)
+            .map_err(|e| format!("vhs-rs: failed to read tape {path}: {e}"))
     }
 }
 
@@ -120,63 +122,60 @@ fn parse_result_json(commands: usize, errors: &[ParseError]) -> serde_json::Valu
     })
 }
 
-fn run(args: RunArgs) -> i32 {
-    let Some(path) = args.tape.as_deref() else {
-        eprintln!("vhs-rs: no tape given; usage: vhs_rs run <tape|-> (see --help)");
-        return ExitKind::Parse as i32;
+/// Shared front half of `run`/`check`: resolve the tape path (`cmd` names the
+/// subcommand in the usage message), read the tape, parse it, and emit any
+/// parse errors (`--json` object or caret diagnostics). On failure returns the
+/// process exit code; on success, the tape path and parsed commands.
+fn load_and_parse(
+    cmd: &str,
+    tape: Option<&str>,
+    json: bool,
+) -> Result<(String, Vec<Command>), i32> {
+    let Some(path) = tape else {
+        eprintln!("vhs-rs: no tape given; usage: vhs_rs {cmd} <tape|-> (see --help)");
+        return Err(ExitKind::Parse as i32);
     };
 
-    let tape = match read_tape(path) {
+    let tape_src = match read_tape(path) {
         Ok(t) => t,
         Err(msg) => {
             eprintln!("{msg}");
-            return ExitKind::Runtime as i32;
+            return Err(ExitKind::Runtime as i32);
         }
     };
 
-    let (commands, errors) = crate::parse_tape(&tape);
+    let (commands, errors) = crate::parse_tape(&tape_src);
     if !errors.is_empty() {
-        if args.json {
+        if json {
             println!("{}", parse_result_json(commands.len(), &errors));
         } else {
-            eprintln!("{}", render_parse_errors(&tape, &errors));
+            eprintln!("{}", render_parse_errors(&tape_src, &errors));
         }
-        return ExitKind::Parse as i32;
+        return Err(ExitKind::Parse as i32);
     }
 
-    crate::evaluator::run(path, &commands, args.json, args.quiet)
+    Ok((path.to_string(), commands))
+}
+
+fn run(args: RunArgs) -> i32 {
+    let (path, commands) = match load_and_parse("run", args.tape.as_deref(), args.json) {
+        Ok(parsed) => parsed,
+        Err(code) => return code,
+    };
+
+    crate::evaluator::run(&path, &commands, args.json, args.quiet)
 }
 
 fn check(args: CheckArgs) -> i32 {
-    let Some(path) = args.tape.as_deref() else {
-        eprintln!("vhs-rs: no tape given; usage: vhs_rs check <tape|-> (see --help)");
-        return ExitKind::Parse as i32;
+    let (_, commands) = match load_and_parse("check", args.tape.as_deref(), args.json) {
+        Ok(parsed) => parsed,
+        Err(code) => return code,
     };
-
-    let tape = match read_tape(path) {
-        Ok(t) => t,
-        Err(msg) => {
-            eprintln!("{msg}");
-            return ExitKind::Runtime as i32;
-        }
-    };
-
-    let (commands, errors) = crate::parse_tape(&tape);
 
     if args.json {
-        println!("{}", parse_result_json(commands.len(), &errors));
-        return if errors.is_empty() {
-            ExitKind::Success as i32
-        } else {
-            ExitKind::Parse as i32
-        };
-    }
-
-    if errors.is_empty() {
-        println!("OK: {} commands", commands.len());
-        ExitKind::Success as i32
+        println!("{}", parse_result_json(commands.len(), &[]));
     } else {
-        eprintln!("{}", render_parse_errors(&tape, &errors));
-        ExitKind::Parse as i32
+        println!("OK: {} commands", commands.len());
     }
+    ExitKind::Success as i32
 }

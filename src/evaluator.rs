@@ -21,6 +21,7 @@ use crate::util::parse_duration;
 use regex::Regex;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 /// Half-period of the synthesized cursor blink (xterm-ish cadence).
@@ -60,10 +61,10 @@ impl Default for Settings {
     }
 }
 
-/// Outcome of a single failed step, mapped to the exit taxonomy.
+/// Outcome of a single failed step, mapped to the exit taxonomy. The report
+/// `reason` derives from `exit` ([`ExitKind::reason`]).
 struct StepFailure {
     exit: ExitKind,
-    reason: &'static str,
     message: String,
     detail: Option<serde_json::Value>,
 }
@@ -122,7 +123,7 @@ async fn run_inner(
                 if which(&cmd.args).is_none() {
                     report.set_failure(
                         None,
-                        "runtime_error",
+                        ExitKind::Runtime.reason(),
                         format!("Require: {} not found in PATH", cmd.args),
                     );
                     return ExitKind::Runtime;
@@ -141,7 +142,7 @@ async fn run_inner(
     if cols < 10 || rows < 2 {
         report.set_failure(
             None,
-            "runtime_error",
+            ExitKind::Runtime.reason(),
             format!(
                 "terminal too small: {cols}x{rows} cells (check Width/Height/Padding/FontSize)"
             ),
@@ -167,7 +168,7 @@ async fn run_inner(
         Err(e) => {
             report.set_failure(
                 None,
-                "runtime_error",
+                ExitKind::Runtime.reason(),
                 format!("failed to spawn {argv:?}: {e}"),
             );
             return ExitKind::Runtime;
@@ -182,13 +183,18 @@ async fn run_inner(
         .filter(|(ext, _)| matches!(ext.as_str(), ".txt" | ".ascii" | ".test"))
         .map(|(_, path)| path.clone())
         .collect();
-    let goldens_registered = !golden_paths.is_empty();
 
-    // Forensics stem: first output path (sans extension), else the tape name.
-    let forensics_stem = outputs
-        .first()
-        .map(|(ext, p)| p.trim_end_matches(ext.as_str()).to_string())
-        .unwrap_or_else(|| tape_name.trim_end_matches(".tape").to_string());
+    // Forensics stem: first output path (sans extension), else the tape name;
+    // either way the `.failure.*` files land next to it.
+    let forensics_stem = {
+        let base = outputs
+            .first()
+            .map(|(_, p)| Path::new(p))
+            .unwrap_or_else(|| Path::new(tape_name));
+        base.with_file_name(base.file_stem().unwrap_or(base.as_os_str()))
+            .to_string_lossy()
+            .into_owned()
+    };
 
     // Implicit initial wait for the prompt — removes the classic race where
     // typing starts before the shell is up. Non-fatal: warn and continue.
@@ -237,13 +243,23 @@ async fn run_inner(
             }
             Err(fail) => {
                 report.record(index, cmd, CommandStatus::Failed, elapsed, fail.detail);
-                report.set_failure(Some(index), fail.reason, fail.message);
+                report.set_failure(Some(index), fail.exit.reason(), fail.message);
                 exit = fail.exit;
+                // Everything after the failed command never ran.
+                for (rest_index, rest_cmd) in commands.iter().enumerate().skip(index + 1) {
+                    report.record(
+                        rest_index,
+                        rest_cmd,
+                        CommandStatus::Skipped,
+                        Duration::ZERO,
+                        None,
+                    );
+                }
                 break;
             }
         }
 
-        if goldens_registered {
+        if !golden_paths.is_empty() {
             golden.record(&session.term().text());
         }
     }
@@ -299,7 +315,11 @@ async fn run_inner(
             .map(|_| ArtifactKind::Cast),
             other => {
                 // validate() should have caught this; belt and braces.
-                report.set_failure(None, "runtime_error", format!("unsupported output {other}"));
+                report.set_failure(
+                    None,
+                    ExitKind::Runtime.reason(),
+                    format!("unsupported output {other}"),
+                );
                 exit = ExitKind::Runtime;
                 continue;
             }
@@ -310,7 +330,7 @@ async fn run_inner(
             Err(e) => {
                 report.set_failure(
                     None,
-                    "runtime_error",
+                    ExitKind::Runtime.reason(),
                     format!("failed to write {path}: {e}"),
                 );
                 if exit == ExitKind::Success {
@@ -384,7 +404,7 @@ async fn execute(
             let count: usize = cmd.args.parse().unwrap_or(1);
             let _ = session.drain();
             if mouse_reporting_enabled(session.events()) {
-                let cursor = session.term().snapshot().cursor;
+                let cursor = session.term().cursor();
                 let bytes = keys::wheel_bytes(cmd.command_type == ScrollUp, cursor.col, cursor.row);
                 for _ in 0..count {
                     session.write(&bytes).await.map_err(io_fail)?;
@@ -399,27 +419,13 @@ async fn execute(
             Ok(None)
         }
 
-        Ctrl => {
-            session
-                .write(&keys::ctrl_bytes(&cmd.args))
-                .await
-                .map_err(io_fail)?;
-            settle(session, settings.typing_speed).await;
-            Ok(None)
-        }
-        Alt => {
-            session
-                .write(&keys::alt_bytes(&cmd.args))
-                .await
-                .map_err(io_fail)?;
-            settle(session, settings.typing_speed).await;
-            Ok(None)
-        }
-        Shift => {
-            session
-                .write(&keys::shift_bytes(&cmd.args))
-                .await
-                .map_err(io_fail)?;
+        Ctrl | Alt | Shift => {
+            let bytes = match cmd.command_type {
+                Ctrl => keys::ctrl_bytes(&cmd.args),
+                Alt => keys::alt_bytes(&cmd.args),
+                _ => keys::shift_bytes(&cmd.args),
+            };
+            session.write(&bytes).await.map_err(io_fail)?;
             settle(session, settings.typing_speed).await;
             Ok(None)
         }
@@ -439,26 +445,22 @@ async fn execute(
                 .await
                 .map_err(io_fail)?
             {
-                Ok(Some(serde_json::json!({
-                    "scope": scope.name(), "regex": regex.as_str(),
-                    "matched": true, "elapsed_ms": started.elapsed().as_millis() as u64,
-                })))
+                Ok(Some(match_detail(scope, &regex, Some(started.elapsed()))))
             } else {
                 let seen = scope.text(session.term());
-                Err(StepFailure {
-                    exit: ExitKind::WaitTimeout,
-                    reason: "wait_timeout",
-                    message: format!(
-                        "timeout waiting for /{}/ to match {}; last value was: {}",
-                        regex.as_str(),
-                        scope.name(),
-                        seen.lines().last().unwrap_or("")
-                    ),
-                    detail: Some(serde_json::json!({
-                        "scope": scope.name(), "regex": regex.as_str(),
-                        "matched": false, "screen_text": seen,
-                    })),
-                })
+                let message = format!(
+                    "timeout waiting for /{}/ to match {}; last value was: {}",
+                    regex.as_str(),
+                    scope.name(),
+                    seen.lines().last().unwrap_or("")
+                );
+                Err(match_failure(
+                    ExitKind::WaitTimeout,
+                    scope,
+                    &regex,
+                    seen,
+                    message,
+                ))
             }
         }
 
@@ -474,20 +476,17 @@ async fn execute(
                     .map_err(io_fail)?
             };
             if matched {
-                Ok(Some(serde_json::json!({
-                    "scope": scope.name(), "regex": regex.as_str(), "matched": true,
-                })))
+                Ok(Some(match_detail(scope, &regex, None)))
             } else {
                 let seen = scope.text(session.term());
-                Err(StepFailure {
-                    exit: ExitKind::AssertFailed,
-                    reason: "assert_failed",
-                    message: format!("Assert /{}/ did not match {}", regex.as_str(), scope.name()),
-                    detail: Some(serde_json::json!({
-                        "scope": scope.name(), "regex": regex.as_str(),
-                        "matched": false, "screen_text": seen,
-                    })),
-                })
+                let message = format!("Assert /{}/ did not match {}", regex.as_str(), scope.name());
+                Err(match_failure(
+                    ExitKind::AssertFailed,
+                    scope,
+                    &regex,
+                    seen,
+                    message,
+                ))
             }
         }
 
@@ -581,6 +580,36 @@ impl Scope {
             Scope::Line => term.current_line(),
             Scope::Screen => term.text(),
         }
+    }
+}
+
+/// Report detail for a successful Wait/Assert match (`elapsed` only for Wait).
+fn match_detail(scope: Scope, regex: &Regex, elapsed: Option<Duration>) -> serde_json::Value {
+    let mut detail = serde_json::json!({
+        "scope": scope.name(), "regex": regex.as_str(), "matched": true,
+    });
+    if let Some(elapsed) = elapsed {
+        detail["elapsed_ms"] = (elapsed.as_millis() as u64).into();
+    }
+    detail
+}
+
+/// `StepFailure` for a Wait timeout / Assert mismatch, with the screen text
+/// the check actually saw.
+fn match_failure(
+    exit: ExitKind,
+    scope: Scope,
+    regex: &Regex,
+    seen: String,
+    message: String,
+) -> StepFailure {
+    StepFailure {
+        exit,
+        message,
+        detail: Some(serde_json::json!({
+            "scope": scope.name(), "regex": regex.as_str(),
+            "matched": false, "screen_text": seen,
+        })),
     }
 }
 
@@ -777,7 +806,9 @@ fn blink_frames(start: Duration, end: Duration, half_period: Duration) -> Vec<(D
 /// lists included); the last set/reset wins. Only called on scroll commands,
 /// so a linear scan is fine.
 fn mouse_reporting_enabled(events: &[SessionEvent]) -> bool {
-    let re = Regex::new(r"\x1b\[\?([0-9;]+)([hl])").expect("static regex");
+    static MODE_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\x1b\[\?([0-9;]+)([hl])").expect("static regex"));
+    let re = &*MODE_RE;
     let mut enabled = false;
     for ev in events {
         if let SessionEventKind::Output(s) = &ev.kind {
@@ -948,7 +979,6 @@ fn io_fail(e: std::io::Error) -> StepFailure {
 fn runtime_fail(message: String) -> StepFailure {
     StepFailure {
         exit: ExitKind::Runtime,
-        reason: "runtime_error",
         message,
         detail: None,
     }

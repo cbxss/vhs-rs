@@ -9,18 +9,11 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use crate::util::ensure_parent;
+
 /// VHS's golden-file separator: exactly 80 `─` characters.
 const SEPARATOR: &str =
     "────────────────────────────────────────────────────────────────────────────────";
-
-fn ensure_parent(path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
-    Ok(())
-}
 
 /// Writes the current screen text to `path` (for `Capture x.txt`), creating
 /// parent directories as needed. The file always ends with a newline.

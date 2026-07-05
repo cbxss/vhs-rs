@@ -81,19 +81,18 @@ impl<'a> Parser<'a> {
             Sleep => vec![self.parse_sleep()],
             Type => vec![self.parse_type()],
             Ctrl => vec![self.parse_ctrl()],
-            Alt => vec![self.parse_alt()],
-            Shift => vec![self.parse_shift()],
+            Alt | Shift => vec![self.parse_modifier_chord(self.cur.token_type)],
             Hide => vec![Command::new(Hide, self.cur.clone())],
             Require => vec![self.parse_require()],
             Show => vec![Command::new(Show, self.cur.clone())],
-            Wait => vec![self.parse_wait()],
+            Wait => vec![self.parse_wait_like(Wait, "Line", false)],
             Source => self.parse_source(),
-            Screenshot => vec![self.parse_screenshot()],
+            Screenshot => vec![self.parse_path_command(Screenshot, ".png")],
             Copy => vec![self.parse_copy()],
             Paste => vec![Command::new(Paste, self.cur.clone())],
             Env => vec![self.parse_env()],
-            Assert => vec![self.parse_assert()],
-            Capture => vec![self.parse_capture()],
+            Assert => vec![self.parse_wait_like(Assert, "Screen", true)],
+            Capture => vec![self.parse_path_command(Capture, ".txt")],
             _ => {
                 self.error(
                     self.cur.clone(),
@@ -104,22 +103,33 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `Wait[+Line|+Screen][@<timeout>] [/regex/]`
-    fn parse_wait(&mut self) -> Command {
-        let mut cmd = Command::new(TokenType::Wait, self.cur.clone());
+    /// `Wait[+Line|+Screen][@<timeout>] [/regex/]` and
+    /// `Assert[+Screen|+Line][@<timeout>] /regex/` (vhs_rs extension) share a
+    /// grammar; they differ only in default scope and whether the regex is
+    /// required (Wait falls back to the default WaitPattern, Assert errors —
+    /// without a timeout an Assert checks immediately, with one it retries
+    /// event-driven until the deadline).
+    fn parse_wait_like(
+        &mut self,
+        cmd_type: TokenType,
+        default_scope: &str,
+        regex_required: bool,
+    ) -> Command {
+        let mut cmd = Command::new(cmd_type, self.cur.clone());
+        let name = cmd_type.as_str();
 
         if self.peek.token_type == TokenType::Plus {
             self.next_token();
             if self.peek.token_type != TokenType::String
                 || (self.peek.literal != "Line" && self.peek.literal != "Screen")
             {
-                self.error(self.peek.clone(), "Wait+ expects Line or Screen");
+                self.error(self.peek.clone(), format!("{name}+ expects Line or Screen"));
                 return cmd;
             }
             cmd.args = self.peek.literal.clone();
             self.next_token();
         } else {
-            cmd.args = "Line".into();
+            cmd.args = default_scope.into();
         }
 
         cmd.options = self.parse_speed();
@@ -127,68 +137,20 @@ impl<'a> Parser<'a> {
             match parse_duration(&cmd.options) {
                 Some(d) if !d.is_zero() => {}
                 _ => {
-                    self.error(self.peek.clone(), "Wait expects positive duration");
+                    self.error(
+                        self.peek.clone(),
+                        format!("{name} expects positive duration"),
+                    );
                     return cmd;
                 }
             }
         }
 
         if self.peek.token_type != TokenType::Regex {
-            // Fall back to the default WaitPattern.
-            return cmd;
-        }
-        self.next_token();
-        if let Err(err) = regex::Regex::new(&self.cur.literal) {
-            self.error(
-                self.cur.clone(),
-                format!(
-                    "Invalid regular expression '{}': {}",
-                    self.cur.literal,
-                    one_line(&err.to_string())
-                ),
-            );
-            return cmd;
-        }
-
-        cmd.args.push(' ');
-        cmd.args.push_str(&self.cur.literal);
-        cmd
-    }
-
-    /// `Assert[+Screen|+Line][@<timeout>] /regex/` — vhs_rs extension.
-    ///
-    /// Default scope is Screen. Without a timeout the check is immediate; with
-    /// one it retries event-driven until the deadline. The regex is required.
-    fn parse_assert(&mut self) -> Command {
-        let mut cmd = Command::new(TokenType::Assert, self.cur.clone());
-
-        if self.peek.token_type == TokenType::Plus {
-            self.next_token();
-            if self.peek.token_type != TokenType::String
-                || (self.peek.literal != "Line" && self.peek.literal != "Screen")
-            {
-                self.error(self.peek.clone(), "Assert+ expects Line or Screen");
-                return cmd;
+            if regex_required {
+                self.error(self.cur.clone(), format!("{name} expects /regex/"));
             }
-            cmd.args = self.peek.literal.clone();
-            self.next_token();
-        } else {
-            cmd.args = "Screen".into();
-        }
-
-        cmd.options = self.parse_speed();
-        if !cmd.options.is_empty() {
-            match parse_duration(&cmd.options) {
-                Some(d) if !d.is_zero() => {}
-                _ => {
-                    self.error(self.peek.clone(), "Assert expects positive duration");
-                    return cmd;
-                }
-            }
-        }
-
-        if self.peek.token_type != TokenType::Regex {
-            self.error(self.cur.clone(), "Assert expects /regex/");
+            // Otherwise fall back to the default WaitPattern.
             return cmd;
         }
         self.next_token();
@@ -316,8 +278,8 @@ impl<'a> Parser<'a> {
         cmd
     }
 
-    /// `Alt+<character>`
-    fn parse_alt(&mut self) -> Command {
+    /// `Alt+<character>` / `Shift+<char>`
+    fn parse_modifier_chord(&mut self, tt: TokenType) -> Command {
         let cmd_token = self.cur.clone();
         if self.peek.token_type == TokenType::Plus {
             self.next_token();
@@ -331,7 +293,7 @@ impl<'a> Parser<'a> {
             ) {
                 let c = self.peek.literal.clone();
                 self.next_token();
-                let mut cmd = Command::new(TokenType::Alt, cmd_token);
+                let mut cmd = Command::new(tt, cmd_token);
                 cmd.args = c;
                 return cmd;
             }
@@ -339,37 +301,13 @@ impl<'a> Parser<'a> {
 
         self.error(
             self.cur.clone(),
-            format!("Expected alt character, got {}", self.cur.literal),
+            format!(
+                "Expected {} character, got {}",
+                tt.as_str().to_lowercase(),
+                self.cur.literal
+            ),
         );
-        Command::new(TokenType::Alt, cmd_token)
-    }
-
-    /// `Shift+<char>`
-    fn parse_shift(&mut self) -> Command {
-        let cmd_token = self.cur.clone();
-        if self.peek.token_type == TokenType::Plus {
-            self.next_token();
-            if matches!(
-                self.peek.token_type,
-                TokenType::String
-                    | TokenType::Enter
-                    | TokenType::LeftBracket
-                    | TokenType::RightBracket
-                    | TokenType::Tab
-            ) {
-                let c = self.peek.literal.clone();
-                self.next_token();
-                let mut cmd = Command::new(TokenType::Shift, cmd_token);
-                cmd.args = c;
-                return cmd;
-            }
-        }
-
-        self.error(
-            self.cur.clone(),
-            format!("Expected shift character, got {}", self.cur.literal),
-        );
-        Command::new(TokenType::Shift, cmd_token)
+        Command::new(tt, cmd_token)
     }
 
     /// `Key[@<time>] [count]`
@@ -462,7 +400,10 @@ impl<'a> Parser<'a> {
                 cmd.args = self.peek.literal.clone();
                 self.next_token();
                 let window_bar = self.cur.literal.clone();
-                if !is_valid_window_bar(&window_bar) {
+                // Validate against the renderer's single source of truth
+                // (empty means "no bar", which is always valid).
+                if !(window_bar.is_empty() || window_bar.parse::<crate::render::BarStyle>().is_ok())
+                {
                     self.error(
                         self.cur.clone(),
                         format!("{} is not a valid bar style.", window_bar),
@@ -536,17 +477,23 @@ impl<'a> Parser<'a> {
             );
         }
 
+        cmd.args = self.collect_strings();
+        cmd
+    }
+
+    /// Consumes consecutive string literals. Adjacent literals are joined with
+    /// a single space; tokens must be whitespace-separated, so this is what
+    /// the user intended.
+    fn collect_strings(&mut self) -> String {
+        let mut args = String::new();
         while self.peek.token_type == TokenType::String {
             self.next_token();
-            cmd.args.push_str(&self.cur.literal);
-            // Adjacent string literals are joined with a single space; tokens
-            // must be whitespace-separated, so this is what the user intended.
+            args.push_str(&self.cur.literal);
             if self.peek.token_type == TokenType::String {
-                cmd.args.push(' ');
+                args.push(' ');
             }
         }
-
-        cmd
+        args
     }
 
     /// `Copy "string"...`
@@ -559,13 +506,7 @@ impl<'a> Parser<'a> {
                 format!("{} expects string", self.cur.literal),
             );
         }
-        while self.peek.token_type == TokenType::String {
-            self.next_token();
-            cmd.args.push_str(&self.cur.literal);
-            if self.peek.token_type == TokenType::String {
-                cmd.args.push(' ');
-            }
-        }
+        cmd.args = self.collect_strings();
         cmd
     }
 
@@ -674,19 +615,24 @@ impl<'a> Parser<'a> {
         filtered
     }
 
-    /// `Screenshot <path>.png`
-    fn parse_screenshot(&mut self) -> Command {
-        let mut cmd = Command::new(TokenType::Screenshot, self.cur.clone());
+    /// `Screenshot <path>.png` and `Capture <path>.txt` (vhs_rs extension:
+    /// dump the screen as plain text) — a command taking one path argument
+    /// with a required extension.
+    fn parse_path_command(&mut self, tt: TokenType, ext: &str) -> Command {
+        let mut cmd = Command::new(tt, self.cur.clone());
 
         if self.peek.token_type != TokenType::String {
-            self.error(self.cur.clone(), "Expected path after Screenshot");
+            self.error(self.cur.clone(), format!("Expected path after {tt}"));
             self.next_token();
             return cmd;
         }
 
         let path = self.peek.literal.clone();
-        if !path.ends_with(".png") {
-            self.error(self.peek.clone(), "Expected file with .png extension");
+        if !path.ends_with(ext) {
+            self.error(
+                self.peek.clone(),
+                format!("Expected file with {ext} extension"),
+            );
             self.next_token();
             return cmd;
         }
@@ -695,35 +641,6 @@ impl<'a> Parser<'a> {
         self.next_token();
         cmd
     }
-
-    /// `Capture <path>.txt` — vhs_rs extension: dump the screen as plain text.
-    fn parse_capture(&mut self) -> Command {
-        let mut cmd = Command::new(TokenType::Capture, self.cur.clone());
-
-        if self.peek.token_type != TokenType::String {
-            self.error(self.cur.clone(), "Expected path after Capture");
-            self.next_token();
-            return cmd;
-        }
-
-        let path = self.peek.literal.clone();
-        if !path.ends_with(".txt") {
-            self.error(self.peek.clone(), "Expected file with .txt extension");
-            self.next_token();
-            return cmd;
-        }
-
-        cmd.args = path;
-        self.next_token();
-        cmd
-    }
-}
-
-fn is_valid_window_bar(w: &str) -> bool {
-    matches!(
-        w,
-        "" | "Colorful" | "ColorfulRight" | "Rings" | "RingsRight"
-    )
 }
 
 fn one_line(s: &str) -> String {

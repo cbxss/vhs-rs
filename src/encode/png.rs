@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use crate::render::Canvas;
+use crate::util::ensure_parent;
 
 fn encode<W: Write>(w: W, canvas: &Canvas) -> io::Result<()> {
     let mut encoder = png::Encoder::new(w, canvas.w as u32, canvas.h as u32);
@@ -16,8 +17,10 @@ fn encode<W: Write>(w: W, canvas: &Canvas) -> io::Result<()> {
     writer.finish().map_err(io::Error::other)
 }
 
-/// Writes the canvas to `path` as a non-interlaced RGBA8 PNG.
+/// Writes the canvas to `path` as a non-interlaced RGBA8 PNG, creating
+/// parent directories as needed.
 pub fn write_png(path: &Path, canvas: &Canvas) -> io::Result<()> {
+    ensure_parent(path)?;
     let file = std::fs::File::create(path)?;
     encode(io::BufWriter::new(file), canvas)
 }

@@ -168,22 +168,11 @@ impl ReportBuilder {
         }
     }
 
-    pub fn has_failure(&self) -> bool {
-        self.failure.is_some()
-    }
-
     pub fn finish(self, exit: ExitKind) -> RunReport {
-        let status = match exit {
-            ExitKind::Success => "success",
-            ExitKind::AssertFailed => "assert_failed",
-            ExitKind::Parse => "parse_error",
-            ExitKind::WaitTimeout => "wait_timeout",
-            ExitKind::Runtime => "runtime_error",
-        };
         RunReport {
             version: 1,
             tape: self.tape,
-            status: status.into(),
+            status: exit.reason().into(),
             exit_code: exit as i32,
             duration_ms: self.started.elapsed().as_millis() as u64,
             term: self.term,

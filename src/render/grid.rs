@@ -5,12 +5,6 @@ use crate::render::renderer::Canvas;
 use crate::snapshot::{Cell, Color, GridSnapshot};
 use crate::theme::{Rgb, Theme};
 
-/// Linear blend of `a` toward `b` by `t` in [0, 1].
-fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
-    let ch = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    Rgb(ch(a.0, b.0), ch(a.1, b.1), ch(a.2, b.2))
-}
-
 /// Resolves a cell's effective foreground/background colors: defaults from
 /// the theme, xterm-style bold brightening of indexed 0-7, inverse swap, and
 /// faint blending halfway toward the background.
@@ -27,7 +21,7 @@ fn cell_colors(cell: &Cell, theme: &Theme) -> (Rgb, Rgb) {
         std::mem::swap(&mut fg, &mut bg);
     }
     if cell.attrs.faint {
-        fg = mix(fg, bg, 0.5);
+        fg = fg.lerp(bg, 0.5);
     }
     (fg, bg)
 }
@@ -86,7 +80,7 @@ pub fn draw_grid(
     origin: (f32, f32),
     cursor_visible: bool,
 ) {
-    let line_thickness = ((metrics.px / 14.0).round() as i32).max(1);
+    let line_thickness = metrics.line_thickness as i32;
 
     for row in 0..snap.rows {
         for col in 0..snap.cols {

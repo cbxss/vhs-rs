@@ -1,6 +1,9 @@
 //! Terminal color themes: VHS/xterm.js-compatible theme parsing, the builtin
 //! theme catalog (vendored VHS themes.json), and indexed-color resolution.
 
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
 use serde::Deserialize;
 
 use crate::snapshot::Color;
@@ -26,6 +29,16 @@ impl Rgb {
             }
             _ => None,
         }
+    }
+
+    /// Linear per-channel blend from `self` toward `other` by `t` in [0, 1].
+    pub fn lerp(self, other: Rgb, t: f32) -> Rgb {
+        let ch = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+        Rgb(
+            ch(self.0, other.0),
+            ch(self.1, other.1),
+            ch(self.2, other.2),
+        )
     }
 }
 
@@ -181,16 +194,28 @@ pub fn default_theme() -> Theme {
 /// The vendored VHS theme catalog.
 const THEMES_JSON: &str = include_str!("../assets/themes.json");
 
-/// Looks up a builtin theme by name, case-insensitively.
-pub fn load_builtin(name: &str) -> Option<Theme> {
+/// The builtin catalog keyed by lowercase name, parsed once on first use
+/// (348 themes; runs that never `Set Theme` pay nothing). The catalog has
+/// duplicate names differing only in case; the first entry wins, matching
+/// the previous linear-scan lookup.
+static BUILTIN_THEMES: LazyLock<HashMap<String, Theme>> = LazyLock::new(|| {
     let raws: Vec<RawTheme> =
         serde_json::from_str(THEMES_JSON).expect("vendored themes.json must parse");
-    let raw = raws.into_iter().find(|t| {
-        t.name
-            .as_deref()
-            .is_some_and(|n| n.eq_ignore_ascii_case(name))
-    })?;
-    raw.apply(default_theme()).ok()
+    let mut themes = HashMap::with_capacity(raws.len());
+    for raw in raws {
+        let Some(name) = raw.name.clone() else {
+            continue;
+        };
+        if let Ok(theme) = raw.apply(default_theme()) {
+            themes.entry(name.to_ascii_lowercase()).or_insert(theme);
+        }
+    }
+    themes
+});
+
+/// Looks up a builtin theme by name, case-insensitively.
+pub fn load_builtin(name: &str) -> Option<Theme> {
+    BUILTIN_THEMES.get(&name.to_ascii_lowercase()).cloned()
 }
 
 /// Parses an inline theme (`Set Theme {json}`); unspecified fields keep the
