@@ -268,7 +268,10 @@ impl<'a> Parser<'a> {
 
             if is_modifier(lookup_identifier(&peek.literal)) {
                 if !in_modifier_chain {
-                    self.error(self.cur.clone(), "Modifiers must come before other characters");
+                    self.error(
+                        self.cur.clone(),
+                        "Modifiers must come before other characters",
+                    );
                     // Clear args so the error is returned.
                     args.clear();
                     self.next_token();
@@ -301,7 +304,10 @@ impl<'a> Parser<'a> {
         if args.is_empty() {
             self.error(
                 self.cur.clone(),
-                format!("Expected control character with args, got {}", self.cur.literal),
+                format!(
+                    "Expected control character with args, got {}",
+                    self.cur.literal
+                ),
             );
         }
 
@@ -595,7 +601,9 @@ impl<'a> Parser<'a> {
 
         let src_path = self.peek.literal.clone();
 
-        if Path::new(&src_path).extension().map(|e| e.to_string_lossy().to_string())
+        if Path::new(&src_path)
+            .extension()
+            .map(|e| e.to_string_lossy().to_string())
             != Some("tape".into())
         {
             self.error(self.peek.clone(), "Expected file with .tape extension");
@@ -612,7 +620,10 @@ impl<'a> Parser<'a> {
         let src_tape = match std::fs::read_to_string(&src_path) {
             Ok(s) => s,
             Err(_) => {
-                self.error(self.peek.clone(), format!("Unable to read file: {}", src_path));
+                self.error(
+                    self.peek.clone(),
+                    format!("Unable to read file: {}", src_path),
+                );
                 self.next_token();
                 return vec![cmd];
             }
@@ -709,7 +720,10 @@ impl<'a> Parser<'a> {
 }
 
 fn is_valid_window_bar(w: &str) -> bool {
-    matches!(w, "" | "Colorful" | "ColorfulRight" | "Rings" | "RingsRight")
+    matches!(
+        w,
+        "" | "Colorful" | "ColorfulRight" | "Rings" | "RingsRight"
+    )
 }
 
 fn one_line(s: &str) -> String {
