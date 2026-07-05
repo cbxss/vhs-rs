@@ -213,6 +213,18 @@ pub struct GifEncoder {
     loop_offset_percent: f64,
 }
 
+// Not derivable (`gif::Encoder` inside `Sink` has no `Debug` impl); the
+// write statistics are the observable state.
+impl std::fmt::Debug for GifEncoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GifEncoder")
+            .field("frames_written", &self.frames_written)
+            .field("frames_coalesced", &self.frames_coalesced)
+            .field("total_delay_cs", &self.total_delay_cs)
+            .finish_non_exhaustive()
+    }
+}
+
 fn to_io(e: gif::EncodingError) -> io::Error {
     match e {
         gif::EncodingError::Io(e) => e,
@@ -312,6 +324,10 @@ impl GifEncoder {
     /// Creates `path` (and any missing parent directories). The GIF header
     /// is written lazily — see module docs on the global-palette strategy —
     /// but the file itself is created (and truncated) immediately.
+    ///
+    /// # Errors
+    /// Returns any I/O error from creating the parent directories or the
+    /// file.
     pub fn create(path: &Path, opts: GifOptions) -> io::Result<Self> {
         ensure_parent(path)?;
 
@@ -350,6 +366,10 @@ impl GifEncoder {
 
     /// Pushes a frame captured at `timestamp` (relative to session start).
     /// `rgba` must be exactly `width * height * 4` bytes.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` if `rgba` has the wrong length, or any I/O
+    /// error from writing the displaced previous frame to the file.
     pub fn push_frame(&mut self, timestamp: Duration, rgba: &[u8]) -> io::Result<()> {
         let expected = self.opts.width as usize * self.opts.height as usize * 4;
         if rgba.len() != expected {
@@ -405,6 +425,10 @@ impl GifEncoder {
 
     /// Flushes the pending frame with `last_frame_hold`, applies any loop
     /// offset, and finalizes the file, returning encoding statistics.
+    ///
+    /// # Errors
+    /// Returns any I/O error from writing the remaining frames or
+    /// finalizing the file.
     pub fn finish(mut self) -> io::Result<GifStats> {
         let hold = self.opts.last_frame_hold;
         if self.pending.is_some() {

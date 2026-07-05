@@ -26,6 +26,18 @@ pub struct Term {
     vt: Vt,
 }
 
+// `avt::Vt` has no `Debug` impl; report the geometry, which is what matters
+// when a `Term` shows up in assertion output.
+impl std::fmt::Debug for Term {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (cols, rows) = self.size();
+        f.debug_struct("Term")
+            .field("cols", &cols)
+            .field("rows", &rows)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Term {
     /// Creates a `cols × rows` terminal with no scrollback (vhs_rs only ever
     /// inspects the visible screen; dropping scrollback keeps memory flat).

@@ -25,6 +25,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
+use tokio::signal::unix::{SignalKind, signal};
 
 /// Half-period of the synthesized cursor blink (xterm-ish cadence).
 const BLINK_HALF_PERIOD: Duration = Duration::from_millis(530);
@@ -113,7 +114,6 @@ pub fn run(
     let outcome = rt.block_on(async {
         let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
         let fut = run_inner(tape_name, commands, &mut report, quiet, deadline);
-        use tokio::signal::unix::{SignalKind, signal};
         let (Ok(mut sigterm), Ok(mut sigint)) = (
             signal(SignalKind::terminate()),
             signal(SignalKind::interrupt()),

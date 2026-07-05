@@ -24,7 +24,7 @@ use crate::term::Term;
 /// `src/util.rs`). Feeding byte chunks yields valid `String`s, holding back
 /// incomplete trailing sequences until the next chunk completes them.
 /// Invalid bytes decode to U+FFFD.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Utf8Decoder(Vec<u8>);
 
 impl Utf8Decoder {
@@ -71,6 +71,7 @@ const READ_BUF_SIZE: usize = 64 * 1024;
 
 /// A running child on a PTY, mirrored into an offscreen terminal, with a
 /// timestamped event log for later replay (GIF frames, `.cast` output).
+#[derive(Debug)]
 pub struct Session {
     pty: Pty,
     term: Term,
@@ -83,6 +84,10 @@ pub struct Session {
 impl Session {
     /// Spawns `command` on a fresh `cols × rows` PTY with `env` applied.
     /// Must be called within a tokio runtime.
+    ///
+    /// # Errors
+    /// Returns any error from [`Pty::spawn`] (forkpty or reactor
+    /// registration).
     pub fn spawn(
         command: &[String],
         env: &[(String, String)],
@@ -103,6 +108,10 @@ impl Session {
 
     /// Consumes everything currently readable from the PTY without blocking.
     /// Returns `true` if any state changed (output fed or EOF observed).
+    ///
+    /// # Errors
+    /// Returns any PTY read error other than `WouldBlock` (which ends the
+    /// drain normally).
     pub fn drain(&mut self) -> io::Result<bool> {
         let mut buf = [0u8; READ_BUF_SIZE];
         let mut changed = false;
@@ -132,6 +141,9 @@ impl Session {
     /// slurp everything else that arrived, then re-check their predicate.
     ///
     /// [`drain`]: Session::drain
+    ///
+    /// # Errors
+    /// Returns any PTY read error.
     pub async fn wait_change(&mut self, deadline: Duration) -> io::Result<bool> {
         if self.exited {
             return Ok(false);
@@ -154,6 +166,9 @@ impl Session {
     }
 
     /// Writes raw bytes (keystrokes) to the child's input.
+    ///
+    /// # Errors
+    /// Returns any write error on the PTY master.
     pub async fn write(&self, bytes: &[u8]) -> io::Result<()> {
         self.pty.write_all(bytes).await
     }
@@ -187,6 +202,9 @@ impl Session {
 
     /// Graceful teardown: drains pending output, then SIGTERM → SIGKILL and
     /// reaps the child. Records the Exit event.
+    ///
+    /// # Errors
+    /// Returns an error if reaping the child (`waitpid`) fails.
     pub async fn shutdown(&mut self) -> io::Result<Option<ExitStatus>> {
         let _ = self.drain();
         let status = self.pty.shutdown().await?;

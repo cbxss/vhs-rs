@@ -37,6 +37,7 @@ pub enum ExitStatus {
 }
 
 /// A spawned child process attached to a pseudo-terminal.
+#[derive(Debug)]
 pub struct Pty {
     child: Pid,
     master: AsyncFd<OwnedFd>,
@@ -52,6 +53,10 @@ impl Pty {
     ///
     /// Must be called from within a tokio runtime (the master fd registers
     /// with the reactor).
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` for an empty `command`, or any OS error from
+    /// `forkpty`, setting the master nonblocking, or reactor registration.
     pub fn spawn(
         command: &[String],
         env: &[(String, String)],
@@ -87,6 +92,10 @@ impl Pty {
 
     /// Reads available output from the child. `Ok(0)` means EOF (the child
     /// has exited and the PTY is drained). Awaits until the fd is readable.
+    ///
+    /// # Errors
+    /// Returns any read error on the master fd (`EIO` maps to EOF, not an
+    /// error).
     pub async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         self.master
             .async_io(Interest::READABLE, |fd| match unistd::read(fd, buf) {
@@ -99,6 +108,10 @@ impl Pty {
 
     /// Nonblocking read. Returns `Ok(0)` on EOF and
     /// `Err(kind = WouldBlock)` when no data is currently available.
+    ///
+    /// # Errors
+    /// `WouldBlock` when no data is buffered; any other read error on the
+    /// master fd (`EIO` maps to EOF).
     pub fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
         match unistd::read(self.master.get_ref(), buf) {
             Ok(n) => Ok(n),
@@ -109,6 +122,10 @@ impl Pty {
 
     /// Writes all of `bytes` to the child's input, awaiting writability as
     /// needed.
+    ///
+    /// # Errors
+    /// Returns any write error on the master fd, or `WriteZero` if the PTY
+    /// stops accepting bytes.
     pub async fn write_all(&self, mut bytes: &[u8]) -> io::Result<()> {
         while !bytes.is_empty() {
             let n = self
@@ -147,6 +164,10 @@ impl Pty {
 
     /// Nonblocking check whether the child has exited (reaps it if so).
     /// Returns the cached status on subsequent calls.
+    ///
+    /// # Errors
+    /// Returns an error if `waitpid` fails (e.g. the child was already
+    /// reaped elsewhere).
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         if self.status.is_some() {
             return Ok(self.status);
@@ -169,6 +190,9 @@ impl Pty {
 
     /// Graceful teardown: SIGTERM, poll for up to ~2s, then SIGKILL and a
     /// blocking reap. Idempotent; returns the child's exit status.
+    ///
+    /// # Errors
+    /// Returns an error if `waitpid` fails while reaping the child.
     pub async fn shutdown(&mut self) -> io::Result<Option<ExitStatus>> {
         if self.status.is_some() {
             return Ok(self.status);

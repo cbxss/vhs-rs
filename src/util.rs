@@ -7,6 +7,10 @@ use std::time::Duration;
 
 /// Creates `path`'s parent directories as needed (a no-op for bare
 /// filenames).
+///
+/// # Errors
+/// Returns any error from `create_dir_all` (permissions, or a non-directory
+/// component in the way).
 pub fn ensure_parent(path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()

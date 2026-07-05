@@ -12,6 +12,7 @@ use crate::report::{Artifact, ArtifactKind, ReportBuilder};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug)]
 pub struct ArtifactRegistry {
     /// Planned end-of-run golden (`.txt`/`.ascii`/`.test`) output paths.
     /// Mid-run writers consult this: an end-of-run golden write must not be

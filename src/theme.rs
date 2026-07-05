@@ -220,6 +220,10 @@ pub fn load_builtin(name: &str) -> Option<Theme> {
 
 /// Parses an inline theme (`Set Theme {json}`); unspecified fields keep the
 /// default theme's values.
+///
+/// # Errors
+/// Returns a [`ThemeError`] when the JSON is malformed or a color value
+/// doesn't parse as `#rrggbb`.
 pub fn from_json(s: &str) -> Result<Theme, ThemeError> {
     let raw: RawTheme = serde_json::from_str(s)?;
     raw.apply(default_theme())

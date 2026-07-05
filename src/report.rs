@@ -90,6 +90,7 @@ pub struct RunReport {
 }
 
 /// Incrementally assembles a `RunReport` during evaluation.
+#[derive(Debug)]
 pub struct ReportBuilder {
     tape: String,
     started: Instant,

@@ -17,6 +17,9 @@ const SEPARATOR: &str =
 
 /// Writes the current screen text to `path` (for `Capture x.txt`), creating
 /// parent directories as needed. The file always ends with a newline.
+///
+/// # Errors
+/// Returns any I/O error from creating parent directories or writing `path`.
 pub fn write_capture(path: &Path, screen_text: &str) -> io::Result<()> {
     ensure_parent(path)?;
     let mut content = String::with_capacity(screen_text.len() + 1);
@@ -62,6 +65,10 @@ impl GoldenWriter {
 
     /// Writes the accumulated content to `path`, creating parent directories
     /// as needed.
+    ///
+    /// # Errors
+    /// Returns any I/O error from creating parent directories or writing
+    /// `path`.
     pub fn save(&self, path: &Path) -> io::Result<()> {
         ensure_parent(path)?;
         fs::write(path, &self.content)

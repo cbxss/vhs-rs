@@ -82,6 +82,11 @@ pub enum Resolved {
 /// Builds the side table for a validated command list. `Err` carries an
 /// internal-error message (post-validate, nothing here can legitimately
 /// fail).
+///
+/// # Errors
+/// Returns a message describing the malformed command — reachable only if
+/// resolution drifts out of sync with parse/validate (an internal bug, not
+/// a user error).
 pub fn resolve_commands(commands: &[Command]) -> Result<Vec<Resolved>, String> {
     commands.iter().map(resolve_one).collect()
 }

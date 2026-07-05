@@ -19,6 +19,10 @@ fn encode<W: Write>(w: W, canvas: &Canvas) -> io::Result<()> {
 
 /// Writes the canvas to `path` as a non-interlaced RGBA8 PNG, creating
 /// parent directories as needed.
+///
+/// # Errors
+/// Returns any I/O error from creating parent directories, the file, or
+/// PNG encoding.
 pub fn write_png(path: &Path, canvas: &Canvas) -> io::Result<()> {
     ensure_parent(path)?;
     let file = std::fs::File::create(path)?;
@@ -59,7 +63,7 @@ mod tests {
     #[test]
     #[ignore]
     fn smoke_render_full_frame() {
-        use crate::render::{BarStyle, RenderOptions, Renderer};
+        use crate::render::{BarStyle, MarginFill, RenderOptions, Renderer};
         use crate::snapshot::{Cell, CellAttrs, Color, Cursor, GridSnapshot};
 
         let opts = RenderOptions {
@@ -69,7 +73,6 @@ mod tests {
             margin_fill: MarginFill::Color(Rgb(0x5b, 0x56, 0xe0)),
             ..RenderOptions::default()
         };
-        use crate::render::MarginFill;
         let theme = crate::theme::load_builtin("Dracula").unwrap();
         let mut r = Renderer::new(opts, theme);
         let (cols, rows) = r.term_size();

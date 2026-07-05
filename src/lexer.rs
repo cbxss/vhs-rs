@@ -7,6 +7,7 @@
 
 use crate::token::{Token, TokenType, lookup_identifier};
 
+#[derive(Debug)]
 pub struct Lexer<'a> {
     input: &'a [u8],
     src: &'a str,

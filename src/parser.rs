@@ -12,6 +12,7 @@ use crate::token::{Token, TokenType, is_modifier, is_setting, lookup_identifier}
 use crate::util::parse_duration;
 use std::path::Path;
 
+#[derive(Debug)]
 pub struct Parser<'a> {
     lexer: Lexer<'a>,
     errors: Vec<ParseError>,

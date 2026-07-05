@@ -22,6 +22,7 @@ const SYMBOLS: &[u8] = include_bytes!("../../assets/fonts/SymbolsNerdFontMono-Re
 const REPLACEMENT: char = '\u{25A1}'; // WHITE SQUARE
 
 /// A rasterized glyph: fontdue placement metrics plus an 8-bit coverage map.
+#[derive(Debug)]
 pub struct CachedGlyph {
     pub metrics: fontdue::Metrics,
     pub bitmap: Vec<u8>,
@@ -65,6 +66,17 @@ pub struct FontSet {
     /// Running min of `ymin` over every cached glyph: the deepest descender
     /// below the baseline (negative) ever rasterized.
     min_ymin: i32,
+}
+
+// `fontdue::Font` has no `Debug` impl; the pixel size and cache occupancy
+// are the useful bits anyway.
+impl std::fmt::Debug for FontSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FontSet")
+            .field("px", &self.px)
+            .field("cached_glyphs", &self.cache.len())
+            .finish_non_exhaustive()
+    }
 }
 
 fn load(bytes: &[u8]) -> Font {

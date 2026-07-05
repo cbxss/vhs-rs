@@ -178,6 +178,17 @@ pub struct Renderer {
     damage_repaints: usize,
 }
 
+// Not derivable (the font set holds non-Debug `fontdue::Font`s); the canvas
+// geometry identifies the renderer well enough.
+impl std::fmt::Debug for Renderer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Renderer")
+            .field("width", &self.opts.width)
+            .field("height", &self.opts.height)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Renderer {
     pub fn new(opts: RenderOptions, theme: Theme) -> Self {
         let fonts = FontSet::new(opts.font_size);

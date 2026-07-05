@@ -98,6 +98,9 @@ fn format_interval(micros: u128) -> String {
 /// needed): the header line, then one `[interval, code, data]` line per
 /// event. `Visibility` events are skipped; time between written events is
 /// preserved.
+///
+/// # Errors
+/// Returns any I/O error from creating parent directories or writing `path`.
 pub fn write_cast(path: &Path, meta: &CastMeta, events: &[SessionEvent]) -> io::Result<()> {
     ensure_parent(path)?;
 
