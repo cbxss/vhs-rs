@@ -154,6 +154,14 @@ pub fn shift_bytes(ch: &str) -> Vec<u8> {
     }
 }
 
+/// SGR-encoded mouse wheel event (`CSI < 64/65 ; col ; row M`) for
+/// `ScrollUp`/`ScrollDown`. `col`/`row` are 0-based cell coordinates; the
+/// wire format is 1-based. Button 64 = wheel up, 65 = wheel down.
+pub fn wheel_bytes(up: bool, col: usize, row: usize) -> Vec<u8> {
+    let button = if up { 64 } else { 65 };
+    format!("\x1b[<{button};{};{}M", col + 1, row + 1).into_bytes()
+}
+
 /// Scans a raw output chunk for DECCKM set/reset (`\x1b[?1h` / `\x1b[?1l`)
 /// and returns the updated application-cursor-keys mode. The last occurrence
 /// wins; `current` is returned unchanged if neither appears.
@@ -342,6 +350,25 @@ mod tests {
 
         for &(ch, expected) in cases {
             assert_eq!(shift_bytes(ch), expected, "Shift+{ch}");
+        }
+    }
+
+    #[test]
+    fn wheel_events() {
+        // (up, col, row, expected) — coordinates are 0-based in, 1-based out.
+        let cases: &[(bool, usize, usize, &[u8])] = &[
+            (true, 0, 0, b"\x1b[<64;1;1M"),
+            (false, 0, 0, b"\x1b[<65;1;1M"),
+            (true, 9, 4, b"\x1b[<64;10;5M"),
+            (false, 79, 23, b"\x1b[<65;80;24M"),
+        ];
+
+        for &(up, col, row, expected) in cases {
+            assert_eq!(
+                wheel_bytes(up, col, row),
+                expected,
+                "up={up} col={col} row={row}"
+            );
         }
     }
 

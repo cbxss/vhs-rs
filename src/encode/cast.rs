@@ -98,10 +98,10 @@ fn format_interval(micros: u128) -> String {
 /// event. `Visibility` events are skipped; time between written events is
 /// preserved.
 pub fn write_cast(path: &Path, meta: &CastMeta, events: &[SessionEvent]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
     }
 
     let mut out = BufWriter::new(fs::File::create(path)?);

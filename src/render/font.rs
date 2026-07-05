@@ -1,4 +1,9 @@
 //! Embedded JetBrains Mono fonts, cell metrics, and a rasterized glyph cache.
+//!
+//! Characters the main font lacks fall back to a single symbols-only Nerd
+//! Font (powerline/devicons/codicons/etc., regular weight — icons have no
+//! bold/italic), which keeps the embedded payload small compared to shipping
+//! four fully patched Nerd Font variants.
 
 use std::collections::HashMap;
 
@@ -8,6 +13,9 @@ const REGULAR: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Regular.
 const BOLD: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Bold.ttf");
 const ITALIC: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Italic.ttf");
 const BOLD_ITALIC: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-BoldItalic.ttf");
+/// Symbols Nerd Font Mono: single-cell icon glyphs, one weight for all four
+/// styles (see assets/fonts/SYMBOLS-LICENSE.txt).
+const SYMBOLS: &[u8] = include_bytes!("../../assets/fonts/SymbolsNerdFontMono-Regular.ttf");
 
 /// Glyph used when the font has no coverage for a character.
 const REPLACEMENT: char = '\u{25A1}'; // WHITE SQUARE
@@ -34,10 +42,11 @@ pub struct Metrics {
     pub px: f32,
 }
 
-/// The four embedded JetBrains Mono variants plus a glyph cache, all at one
-/// fixed pixel size.
+/// The four embedded JetBrains Mono variants, the symbols fallback font, and
+/// a glyph cache, all at one fixed pixel size.
 pub struct FontSet {
     fonts: [Font; 4],
+    symbols: Font,
     px: f32,
     cache: HashMap<(char, bool, bool), CachedGlyph>,
 }
@@ -50,11 +59,11 @@ impl FontSet {
     /// Loads the embedded fonts for rasterization at `px` pixels.
     pub fn new(px: f32) -> FontSet {
         let load = |bytes: &[u8]| {
-            Font::from_bytes(bytes, FontSettings::default())
-                .expect("embedded JetBrains Mono must parse")
+            Font::from_bytes(bytes, FontSettings::default()).expect("embedded font must parse")
         };
         FontSet {
             fonts: [load(REGULAR), load(BOLD), load(ITALIC), load(BOLD_ITALIC)],
+            symbols: load(SYMBOLS),
             px,
             cache: HashMap::new(),
         }
@@ -99,18 +108,23 @@ impl FontSet {
 
     /// Rasterizes (or returns the cached) glyph for a character + attributes.
     ///
-    /// Characters the font lacks fall back to U+25A1 WHITE SQUARE, or a blank
-    /// glyph if even that is missing.
+    /// Resolution order: the style's JetBrains Mono variant, then the symbols
+    /// fallback font (regular weight regardless of style — icons have no
+    /// bold/italic), then U+25A1 WHITE SQUARE from the main font, then a
+    /// blank glyph. The cache is keyed by (char, bold, italic); the cached
+    /// entry simply holds whatever font rasterized it.
     pub fn glyph(&mut self, ch: char, bold: bool, italic: bool) -> &CachedGlyph {
         let key = (ch, bold, italic);
         if !self.cache.contains_key(&key) {
-            let font = &self.fonts[variant_index(bold, italic)];
-            let drawn = if font.lookup_glyph_index(ch) != 0 {
-                ch
-            } else if font.lookup_glyph_index(REPLACEMENT) != 0 {
-                REPLACEMENT
+            let main = &self.fonts[variant_index(bold, italic)];
+            let (font, drawn) = if main.lookup_glyph_index(ch) != 0 {
+                (main, ch)
+            } else if self.symbols.lookup_glyph_index(ch) != 0 {
+                (&self.symbols, ch)
+            } else if main.lookup_glyph_index(REPLACEMENT) != 0 {
+                (main, REPLACEMENT)
             } else {
-                ' '
+                (main, ' ')
             };
             let (metrics, bitmap) = font.rasterize(drawn, self.px);
             self.cache.insert(key, CachedGlyph { metrics, bitmap });
@@ -161,10 +175,57 @@ mod tests {
     }
 
     #[test]
+    fn nerd_glyph_coverage_via_symbols_fallback() {
+        let mut fonts = FontSet::new(22.0);
+        // The devicon U+E718 is absent from plain JetBrains Mono in every
+        // variant, so rendering it must go through the symbols fallback.
+        for &(b, i) in &[(false, false), (true, false), (false, true), (true, true)] {
+            assert_eq!(
+                fonts.pick(b, i).lookup_glyph_index('\u{E718}'),
+                0,
+                "U+E718 unexpectedly in the main font (bold={b} italic={i})"
+            );
+        }
+        assert_ne!(
+            fonts.symbols.lookup_glyph_index('\u{E718}'),
+            0,
+            "U+E718 missing from the symbols font"
+        );
+
+        // Both the powerline triangle and the devicon rasterize with ink in
+        // all four styles (icons resolve through the single symbols weight).
+        for ch in ['\u{E0B0}', '\u{E718}'] {
+            for &(b, i) in &[(false, false), (true, false), (false, true), (true, true)] {
+                let g = fonts.glyph(ch, b, i);
+                assert!(
+                    g.bitmap.iter().any(|&c| c > 0),
+                    "U+{:04X} has no ink (bold={b} italic={i})",
+                    ch as u32
+                );
+                assert!(g.metrics.width > 0 && g.metrics.height > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn cell_metrics_match_plain_jetbrains_mono() {
+        // JetBrains Mono's '0' advance is 600/1000 em; the grid derives from
+        // the main font only, never the symbols fallback. Guard within 1%.
+        let px = 22.0;
+        let fonts = FontSet::new(px);
+        let advance = fonts.pick(false, false).metrics('0', px).advance_width;
+        let expected = 0.6 * px;
+        assert!(
+            (advance - expected).abs() <= expected * 0.01,
+            "'0' advance {advance} deviates >1% from {expected}"
+        );
+    }
+
+    #[test]
     fn missing_glyph_falls_back() {
         let mut fonts = FontSet::new(22.0);
-        // JetBrains Mono has no CJK coverage; must not panic and should draw
-        // the replacement square (which has ink).
+        // Neither JetBrains Mono nor the symbols font covers CJK; must not
+        // panic and should draw the replacement square (which has ink).
         let g = fonts.glyph('\u{4E2D}', false, false);
         assert!(g.bitmap.iter().any(|&c| c > 0), "replacement glyph has ink");
     }

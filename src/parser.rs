@@ -474,13 +474,13 @@ impl<'a> Parser<'a> {
                 self.next_token();
                 let margin_fill = self.cur.literal.clone();
                 // Check if margin color is a valid hex string.
-                if let Some(hex) = margin_fill.strip_prefix('#') {
-                    if u64::from_str_radix(hex, 16).is_err() || margin_fill.len() != 7 {
-                        self.error(
-                            self.cur.clone(),
-                            format!("\"{}\" is not a valid color.", margin_fill),
-                        );
-                    }
+                if let Some(hex) = margin_fill.strip_prefix('#')
+                    && (u64::from_str_radix(hex, 16).is_err() || margin_fill.len() != 7)
+                {
+                    self.error(
+                        self.cur.clone(),
+                        format!("\"{}\" is not a valid color.", margin_fill),
+                    );
                 }
             }
             TokenType::CursorBlink => {

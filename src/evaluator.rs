@@ -19,8 +19,15 @@ use crate::theme::{self, Rgb, Theme};
 use crate::token::TokenType;
 use crate::util::parse_duration;
 use regex::Regex;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+/// Half-period of the synthesized cursor blink (xterm-ish cadence).
+const BLINK_HALF_PERIOD: Duration = Duration::from_millis(530);
+/// Idle gaps longer than this get no synthesized blink frames (degenerate
+/// tapes would otherwise balloon the GIF).
+const BLINK_MAX_GAP: Duration = Duration::from_secs(30);
 
 /// Everything `Set` can configure, with VHS defaults.
 struct Settings {
@@ -30,6 +37,8 @@ struct Settings {
     wait_pattern: Regex,
     playback_speed: f64,
     max_fps: f64,
+    cursor_blink: bool,
+    loop_offset: Option<f64>,
     render: RenderOptions,
     theme: Theme,
 }
@@ -43,6 +52,8 @@ impl Default for Settings {
             wait_pattern: Regex::new(">$").expect("default pattern"),
             playback_speed: 1.0,
             max_fps: 50.0,
+            cursor_blink: true, // VHS default
+            loop_offset: None,
             render: RenderOptions::default(),
             theme: theme::default_theme(),
         }
@@ -166,9 +177,12 @@ async fn run_inner(
 
     // Golden writer for `Output .txt/.ascii/.test` (records after every command).
     let mut golden = txt::GoldenWriter::new();
-    let goldens_registered = outputs
+    let golden_paths: HashSet<String> = outputs
         .iter()
-        .any(|(ext, _)| matches!(ext.as_str(), ".txt" | ".ascii" | ".test"));
+        .filter(|(ext, _)| matches!(ext.as_str(), ".txt" | ".ascii" | ".test"))
+        .map(|(_, path)| path.clone())
+        .collect();
+    let goldens_registered = !golden_paths.is_empty();
 
     // Forensics stem: first output path (sans extension), else the tape name.
     let forensics_stem = outputs
@@ -209,6 +223,7 @@ async fn run_inner(
             &mut renderer,
             &mut clipboard,
             &mut theme_timeline,
+            &golden_paths,
             report,
             index,
             quiet,
@@ -317,6 +332,7 @@ async fn execute(
     renderer: &mut Renderer,
     clipboard: &mut String,
     theme_timeline: &mut Vec<(Duration, Theme)>,
+    golden_paths: &HashSet<String>,
     report: &mut ReportBuilder,
     index: usize,
     quiet: bool,
@@ -364,11 +380,23 @@ async fn execute(
         }
 
         ScrollUp | ScrollDown => {
-            // Deferred: needs synthesized mouse-wheel events. Explicit, not silent.
-            Err(runtime_fail(format!(
-                "{} is not supported yet",
-                cmd.command_type
-            )))
+            let speed = speed_of(cmd, settings.typing_speed);
+            let count: usize = cmd.args.parse().unwrap_or(1);
+            let _ = session.drain();
+            if mouse_reporting_enabled(session.events()) {
+                let cursor = session.term().snapshot().cursor;
+                let bytes = keys::wheel_bytes(cmd.command_type == ScrollUp, cursor.col, cursor.row);
+                for _ in 0..count {
+                    session.write(&bytes).await.map_err(io_fail)?;
+                    settle(session, speed).await;
+                }
+            } else if !quiet {
+                eprintln!(
+                    "vterm: warning: {}: child has not enabled mouse reporting; ignored",
+                    cmd.command_type
+                );
+            }
+            Ok(None)
         }
 
         Ctrl => {
@@ -470,11 +498,22 @@ async fn execute(
             png::write_png(Path::new(&cmd.args), canvas)
                 .map_err(|e| runtime_fail(format!("screenshot {}: {e}", cmd.args)))?;
             report.add_artifact(&cmd.args, ArtifactKind::Png, Some(index));
-            // Text sibling: the same screen as the agent's cheap input.
+            // Text sibling: the same screen as the agent's cheap input. Skip
+            // it if that path is a registered `Output` golden target — the
+            // end-of-run golden write must not be clobbered.
             let txt_path = PathBuf::from(&cmd.args).with_extension("txt");
-            txt::write_capture(&txt_path, &session.term().text())
-                .map_err(|e| runtime_fail(format!("screenshot text sibling: {e}")))?;
-            report.add_artifact(txt_path.to_string_lossy(), ArtifactKind::Text, Some(index));
+            let txt_str = txt_path.to_string_lossy();
+            if golden_paths.contains(txt_str.as_ref()) {
+                if !quiet {
+                    eprintln!(
+                        "vterm: warning: screenshot text sibling {txt_str} collides with an Output golden target; skipped"
+                    );
+                }
+            } else {
+                txt::write_capture(&txt_path, &session.term().text())
+                    .map_err(|e| runtime_fail(format!("screenshot text sibling: {e}")))?;
+                report.add_artifact(txt_str, ArtifactKind::Text, Some(index));
+            }
             Ok(Some(serde_json::json!({"path": cmd.args})))
         }
 
@@ -628,35 +667,131 @@ fn encode_gif(
             ..gif::GifOptions::new(opts.width as u16, opts.height as u16)
         },
     )?;
+    if let Some(p) = settings.loop_offset {
+        enc.set_loop_offset(p);
+    }
 
     // Start from the tape's initial theme; apply mid-tape changes at their time.
     renderer.set_theme(initial_theme);
     let mut theme_idx = 0;
     let mut visible = true;
+    let blink = settings.cursor_blink;
+    // Time + grid of the last pushed frame; blink frames synthesized from it.
+    let mut last_frame: Option<(Duration, crate::snapshot::GridSnapshot)> = None;
 
+    // Renders idle-gap blink toggles between the last frame and `until`.
+    let synth = |renderer: &mut Renderer,
+                 enc: &mut gif::GifEncoder,
+                 last: &Option<(Duration, crate::snapshot::GridSnapshot)>,
+                 until: Duration|
+     -> std::io::Result<()> {
+        let Some((since, snap)) = last else {
+            return Ok(());
+        };
+        if !snap.cursor.visible || until.saturating_sub(*since) > BLINK_MAX_GAP {
+            return Ok(());
+        }
+        for (t, on) in blink_frames(*since, until, BLINK_HALF_PERIOD) {
+            let canvas = renderer.render_frame(snap, on);
+            enc.push_frame(t, &canvas.buf)?;
+        }
+        Ok(())
+    };
+
+    let mut end_time = Duration::ZERO;
     for ev in events {
         while theme_idx < theme_timeline.len() && theme_timeline[theme_idx].0 <= ev.time {
             renderer.set_theme(theme_timeline[theme_idx].1.clone());
             theme_idx += 1;
         }
+        end_time = end_time.max(ev.time);
         match &ev.kind {
             SessionEventKind::Output(s) => {
+                if visible && blink {
+                    synth(renderer, &mut enc, &last_frame, ev.time)?;
+                }
                 term.feed(s);
                 if visible {
-                    let canvas = renderer.render(&term.snapshot());
+                    let snap = term.snapshot();
+                    let cursor_on = !blink || blink_phase_on(ev.time, BLINK_HALF_PERIOD);
+                    let canvas = renderer.render_frame(&snap, cursor_on);
                     enc.push_frame(ev.time, &canvas.buf)?;
+                    last_frame = Some((ev.time, snap));
                 }
             }
-            SessionEventKind::Resize(c, r) => term.resize(*c, *r),
+            SessionEventKind::Resize(c, r) => {
+                term.resize(*c, *r);
+                last_frame = None; // stale grid; don't synthesize from it
+            }
             SessionEventKind::Visibility(v) => visible = *v,
-            SessionEventKind::Exit => break,
+            SessionEventKind::Exit => {
+                // Blink through the trailing idle gap before the child exits.
+                if visible && blink {
+                    synth(renderer, &mut enc, &last_frame, ev.time)?;
+                }
+                break;
+            }
         }
+    }
+
+    // The held final frame must end cursor-visible: re-push the last grid
+    // with the cursor on (coalesces if the pending frame already shows it).
+    if blink && let Some((_, snap)) = &last_frame {
+        let canvas = renderer.render_frame(snap, true);
+        enc.push_frame(end_time, &canvas.buf)?;
     }
 
     // Restore the final theme for any later renders (Output .png, forensics).
     renderer.set_theme(settings.theme.clone());
     enc.finish()?;
     Ok(())
+}
+
+/// Blink phase at absolute session time `t`: `true` = cursor shown.
+fn blink_phase_on(t: Duration, half_period: Duration) -> bool {
+    (t.as_millis() / half_period.as_millis()).is_multiple_of(2)
+}
+
+/// Blink toggle boundaries strictly inside `(start, end)`, each paired with
+/// the phase that begins there (`true` = cursor shown). Pure so the boundary
+/// math is unit-testable; phases align to absolute time, not the gap start,
+/// so cadence stays continuous across frames.
+fn blink_frames(start: Duration, end: Duration, half_period: Duration) -> Vec<(Duration, bool)> {
+    let half_ms = half_period.as_millis() as u64;
+    let mut frames = Vec::new();
+    if half_ms == 0 || end <= start {
+        return frames;
+    }
+    let start_ms = start.as_millis() as u64;
+    let end_ms = end.as_millis() as u64;
+    let mut k = start_ms / half_ms + 1; // first boundary after `start`
+    while k * half_ms < end_ms {
+        frames.push((Duration::from_millis(k * half_ms), k.is_multiple_of(2)));
+        k += 1;
+    }
+    frames
+}
+
+/// Whether the child has mouse reporting enabled: scans Output events for
+/// DEC private modes 1000/1002/1003 (`CSI ? … h|l`, `;`-separated parameter
+/// lists included); the last set/reset wins. Only called on scroll commands,
+/// so a linear scan is fine.
+fn mouse_reporting_enabled(events: &[SessionEvent]) -> bool {
+    let re = Regex::new(r"\x1b\[\?([0-9;]+)([hl])").expect("static regex");
+    let mut enabled = false;
+    for ev in events {
+        if let SessionEventKind::Output(s) = &ev.kind {
+            for cap in re.captures_iter(s) {
+                if cap[1]
+                    .split(';')
+                    .any(|p| matches!(p, "1000" | "1002" | "1003"))
+                {
+                    enabled = &cap[2] == "h";
+                }
+            }
+        }
+    }
+    enabled
 }
 
 // ---- Settings -------------------------------------------------------------------
@@ -702,17 +837,17 @@ fn apply_setting(settings: &mut Settings, cmd: &Command, quiet: bool) {
             }
         }
         "PlaybackSpeed" => {
-            if let Ok(f) = v.parse::<f64>() {
-                if f > 0.0 {
-                    settings.playback_speed = f;
-                }
+            if let Ok(f) = v.parse::<f64>()
+                && f > 0.0
+            {
+                settings.playback_speed = f;
             }
         }
         "Framerate" => {
-            if let Ok(f) = v.parse::<f64>() {
-                if f > 0.0 {
-                    settings.max_fps = f.min(50.0);
-                }
+            if let Ok(f) = v.parse::<f64>()
+                && f > 0.0
+            {
+                settings.max_fps = f.min(50.0);
             }
         }
         "WaitTimeout" => {
@@ -736,25 +871,34 @@ fn apply_setting(settings: &mut Settings, cmd: &Command, quiet: bool) {
                 None => warn(format!("unknown theme {v:?}; keeping current")),
             }
         }
-        "CursorBlink" => { /* parsed; blink animation lands in M5 */ }
-        "LoopOffset" => warn("Set LoopOffset is not supported yet; ignored".into()),
+        "CursorBlink" => match v {
+            "true" => settings.cursor_blink = true,
+            "false" => settings.cursor_blink = false,
+            other => warn(format!("CursorBlink {other}: expected true or false")),
+        },
+        "LoopOffset" => match v.trim_end_matches('%').parse::<f64>() {
+            Ok(p) if (0.0..=100.0).contains(&p) => settings.loop_offset = Some(p),
+            _ => warn(format!(
+                "LoopOffset {v}: expected a percentage 0-100; ignored"
+            )),
+        },
         other => warn(format!("unknown setting {other}")),
     }
 }
 
 fn set_usize(target: &mut usize, v: &str) {
-    if let Ok(n) = v.parse::<f64>() {
-        if n >= 0.0 {
-            *target = n as usize;
-        }
+    if let Ok(n) = v.parse::<f64>()
+        && n >= 0.0
+    {
+        *target = n as usize;
     }
 }
 
 fn set_f32(target: &mut f32, v: &str) {
-    if let Ok(n) = v.parse::<f32>() {
-        if n > 0.0 {
-            *target = n;
-        }
+    if let Ok(n) = v.parse::<f32>()
+        && n > 0.0
+    {
+        *target = n;
     }
 }
 
@@ -807,5 +951,107 @@ fn runtime_fail(message: String) -> StepFailure {
         reason: "runtime_error",
         message,
         detail: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ms(v: u64) -> Duration {
+        Duration::from_millis(v)
+    }
+
+    #[test]
+    fn blink_phase_follows_half_periods() {
+        let half = ms(530);
+        // [0, 530) on, [530, 1060) off, [1060, 1590) on, ...
+        assert!(blink_phase_on(ms(0), half));
+        assert!(blink_phase_on(ms(529), half));
+        assert!(!blink_phase_on(ms(530), half));
+        assert!(!blink_phase_on(ms(1059), half));
+        assert!(blink_phase_on(ms(1060), half));
+        assert!(!blink_phase_on(ms(530 * 3), half));
+    }
+
+    #[test]
+    fn blink_frames_boundary_math() {
+        let half = ms(530);
+
+        // Gap shorter than the half-period: no synthesized frames.
+        assert!(blink_frames(ms(0), ms(529), half).is_empty());
+        assert!(blink_frames(ms(600), ms(1000), half).is_empty());
+
+        // Empty and inverted ranges.
+        assert!(blink_frames(ms(100), ms(100), half).is_empty());
+        assert!(blink_frames(ms(200), ms(100), half).is_empty());
+
+        // A 2s gap from t=0 crosses boundaries at 530/1060/1590 with
+        // alternating phases (off, on, off).
+        let frames = blink_frames(ms(0), ms(2000), half);
+        assert_eq!(
+            frames,
+            vec![(ms(530), false), (ms(1060), true), (ms(1590), false)]
+        );
+
+        // Boundaries are exclusive at both ends.
+        let frames = blink_frames(ms(530), ms(1060), half);
+        assert!(frames.is_empty(), "got {frames:?}");
+
+        // Phase aligns to absolute time, not to the gap start: a gap starting
+        // mid-phase still toggles at global boundaries.
+        let frames = blink_frames(ms(700), ms(1700), half);
+        assert_eq!(frames, vec![(ms(1060), true), (ms(1590), false)]);
+    }
+
+    fn out(s: &str) -> SessionEvent {
+        SessionEvent {
+            time: Duration::ZERO,
+            kind: SessionEventKind::Output(s.into()),
+        }
+    }
+
+    #[test]
+    fn mouse_mode_scanner() {
+        // (events, expected)
+        let cases: &[(Vec<SessionEvent>, bool)] = &[
+            (vec![], false),
+            (vec![out("plain output, no modes")], false),
+            (vec![out("\x1b[?1000h")], true),
+            (vec![out("\x1b[?1002h")], true),
+            (vec![out("\x1b[?1003h")], true),
+            // The last occurrence wins, across events.
+            (vec![out("\x1b[?1000h"), out("\x1b[?1000l")], false),
+            (vec![out("\x1b[?1000l"), out("\x1b[?1002h")], true),
+            (vec![out("pre\x1b[?1000h mid \x1b[?1000l post")], false),
+            // Combined parameter lists (e.g. vim: mouse + SGR ext together).
+            (vec![out("\x1b[?1002;1006h")], true),
+            (vec![out("\x1b[?1006;1000l")], false),
+            // Look-alike private modes must not trigger.
+            (
+                vec![out("\x1b[?1004h\x1b[?1006h\x1b[?1049h\x1b[?25h")],
+                false,
+            ),
+            (vec![out("\x1b[?12h\x1b[?1h")], false),
+            // Non-Output events are ignored.
+            (
+                vec![
+                    out("\x1b[?1000h"),
+                    SessionEvent {
+                        time: Duration::ZERO,
+                        kind: SessionEventKind::Exit,
+                    },
+                ],
+                true,
+            ),
+        ];
+
+        for (events, expected) in cases {
+            assert_eq!(
+                mouse_reporting_enabled(events),
+                *expected,
+                "events: {events:?}"
+            );
+        }
     }
 }
