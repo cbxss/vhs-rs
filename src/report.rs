@@ -59,8 +59,9 @@ pub struct Artifact {
 pub struct Failure {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command_index: Option<usize>,
-    /// Machine-stable reason: assert_failed | wait_timeout | runtime_error |
-    /// child_exited | parse_error.
+    /// Machine-stable reason. Matches `status` except where a more specific
+    /// cause exists: assert_failed | wait_timeout | runtime_error |
+    /// child_exited | run_timeout | interrupted | parse_error.
     pub reason: String,
     pub message: String,
 }

@@ -387,6 +387,7 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenType::TypingSpeed => {
+                let value_token = self.peek.clone();
                 cmd.args = self.peek.literal.clone();
                 self.next_token();
                 // Allow TypingSpeed to have bare units: Set TypingSpeed 10ms
@@ -398,6 +399,11 @@ impl<'a> Parser<'a> {
                     self.next_token();
                 } else if cmd.options == "TypingSpeed" {
                     cmd.args.push('s');
+                }
+                // A value that isn't a duration would be silently ignored at
+                // runtime; reject it here where there's a line number.
+                if crate::util::parse_duration(&cmd.args).is_none() {
+                    self.error(value_token, format!("Expected time after {}", cmd.options));
                 }
             }
             TokenType::WindowBar => {

@@ -117,6 +117,8 @@ pattern missed without opening a single file.
   "commands": [
     { "index": 3, "line": 9, "col": 1, "command": "Wait Line",
       "status": "ok", "elapsed_ms": 132 },
+    // `command` is the rendered form; the tape syntax for this line is
+    // `Assert+Screen /status: 42/`.
     { "index": 4, "line": 11, "col": 1, "command": "Assert Screen status: 42",
       "status": "failed",
       "detail": { "matched": false, "regex": "status: 42", "scope": "Screen",
@@ -132,6 +134,24 @@ pattern missed without opening a single file.
   ]
 }
 ```
+
+Details an agent can rely on:
+
+- `run --json` prints a run report on **every** exit path, parse errors
+  included (`status: "parse_error"`, plus a top-level `errors` array with
+  `{line, col, message}` diagnostics) — one schema to parse, keyed on
+  `status`. Even SIGINT/SIGTERM produce a final (partial) report.
+- `failure.reason` matches `status` except when a more specific cause is
+  known: `child_exited` (the shell died — a longer timeout won't help),
+  `run_timeout` (`--timeout` expired), or `interrupted` (signal).
+- `vhs-rs run --timeout 60s …` puts a wall-clock budget on the whole run:
+  on expiry it exits 4 with reason `run_timeout` — and still writes the
+  report and failure forensics. Prefer this over killing the process.
+- On a failed Wait/Assert, `detail.screen_text` is always the **full**
+  screen; Line-scoped checks also carry `detail.line_text`, the single line
+  the regex ran against.
+- Tapes read from stdin (`vhs-rs run -`) name their forensics
+  `stdin.failure.txt` / `stdin.failure.png`.
 
 `vhs-rs check --json` prints `{"ok", "commands", "errors": [{"line", "col", "message"}]}`.
 

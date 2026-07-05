@@ -35,6 +35,9 @@ impl ArtifactRegistry {
     /// `planned_outputs` are the `(ext, path)` pairs from the `Output`
     /// pre-pass, in tape order.
     pub fn new(planned_outputs: &[(String, String)], tape_name: &str, quiet: bool) -> Self {
+        // stdin tapes would otherwise yield `-.failure.txt` — a dash-prefixed
+        // filename most CLI tools parse as a flag.
+        let tape_name = if tape_name == "-" { "stdin" } else { tape_name };
         let golden_targets = planned_outputs
             .iter()
             .filter(|(ext, _)| matches!(ext.as_str(), ".txt" | ".ascii" | ".test"))
@@ -153,6 +156,8 @@ mod tests {
             ),
             // Tape name without an extension is used as-is.
             (&[], "noext", "noext.failure.txt", "noext.failure.png"),
+            // stdin tapes map to a non-dash-prefixed stem.
+            (&[], "-", "stdin.failure.txt", "stdin.failure.png"),
         ];
         for (outputs, tape, txt, png) in cases {
             let r = reg(outputs, tape);

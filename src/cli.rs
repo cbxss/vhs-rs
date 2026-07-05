@@ -6,11 +6,13 @@
 //! part of the stable contract).
 
 use std::io::Read as _;
+use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 
 use crate::command::Command;
 use crate::error::{ExitKind, ParseError, render_parse_errors};
+use crate::report::ReportBuilder;
 
 const EXIT_CODES_HELP: &str = "\
 Exit codes:
@@ -60,6 +62,16 @@ struct RunArgs {
     /// Suppress progress output (errors are still printed)
     #[arg(long)]
     quiet: bool,
+
+    /// Whole-run wall-clock budget (e.g. 30s, 2m). On expiry the run fails
+    /// with exit 4, reason `run_timeout`, and still writes report + forensics
+    #[arg(long, value_parser = parse_timeout)]
+    timeout: Option<Duration>,
+}
+
+fn parse_timeout(s: &str) -> Result<Duration, String> {
+    crate::util::parse_duration(s)
+        .ok_or_else(|| format!("invalid duration {s:?} (examples: 500ms, 30s, 2m)"))
 }
 
 #[derive(Args)]
@@ -122,14 +134,39 @@ fn parse_result_json(commands: usize, errors: &[ParseError]) -> serde_json::Valu
     })
 }
 
+/// Which `--json` shape a subcommand emits on load/parse failure: `run`
+/// always prints a run report (agents switch on its `status`); `check`
+/// prints the lighter parse-result object.
+#[derive(Clone, Copy, PartialEq)]
+enum JsonShape {
+    RunReport,
+    ParseResult,
+}
+
+/// Run-report JSON for a run that never started (unreadable tape, parse
+/// errors): same shape as a real report — `status`, `exit_code`, `failure` —
+/// plus a top-level `errors` array with the per-error diagnostics.
+fn run_error_json(tape: &str, exit: ExitKind, message: &str, errors: &[ParseError]) -> String {
+    let mut builder = ReportBuilder::new(tape);
+    builder.set_failure(None, exit.reason(), message);
+    let report = builder.finish(exit);
+    let mut v = serde_json::to_value(&report).unwrap_or_default();
+    if !errors.is_empty() {
+        v["errors"] = parse_result_json(0, errors)["errors"].take();
+    }
+    serde_json::to_string_pretty(&v).unwrap_or_else(|_| report.to_json())
+}
+
 /// Shared front half of `run`/`check`: resolve the tape path (`cmd` names the
 /// subcommand in the usage message), read the tape, parse it, and emit any
-/// parse errors (`--json` object or caret diagnostics). On failure returns the
-/// process exit code; on success, the tape path and parsed commands.
+/// errors (`--json` object per `shape`, or caret diagnostics). On failure
+/// returns the process exit code; on success, the tape path and parsed
+/// commands.
 fn load_and_parse(
     cmd: &str,
     tape: Option<&str>,
     json: bool,
+    shape: JsonShape,
 ) -> Result<(String, Vec<Command>), i32> {
     let Some(path) = tape else {
         eprintln!("vhs-rs: no tape given; usage: vhs_rs {cmd} <tape|-> (see --help)");
@@ -139,6 +176,22 @@ fn load_and_parse(
     let tape_src = match read_tape(path) {
         Ok(t) => t,
         Err(msg) => {
+            if json {
+                match shape {
+                    JsonShape::RunReport => {
+                        println!("{}", run_error_json(path, ExitKind::Runtime, &msg, &[]));
+                    }
+                    JsonShape::ParseResult => {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "ok": false, "commands": 0,
+                                "errors": [{"line": 0, "col": 0, "message": msg}],
+                            })
+                        );
+                    }
+                }
+            }
             eprintln!("{msg}");
             return Err(ExitKind::Runtime as i32);
         }
@@ -147,7 +200,15 @@ fn load_and_parse(
     let (commands, errors) = crate::parse_tape(&tape_src);
     if !errors.is_empty() {
         if json {
-            println!("{}", parse_result_json(commands.len(), &errors));
+            match shape {
+                JsonShape::RunReport => {
+                    let message = format!("{} parse error(s)", errors.len());
+                    println!("{}", run_error_json(path, ExitKind::Parse, &message, &errors));
+                }
+                JsonShape::ParseResult => {
+                    println!("{}", parse_result_json(commands.len(), &errors));
+                }
+            }
         } else {
             eprintln!("{}", render_parse_errors(&tape_src, &errors));
         }
@@ -158,16 +219,26 @@ fn load_and_parse(
 }
 
 fn run(args: RunArgs) -> i32 {
-    let (path, commands) = match load_and_parse("run", args.tape.as_deref(), args.json) {
+    let (path, commands) = match load_and_parse(
+        "run",
+        args.tape.as_deref(),
+        args.json,
+        JsonShape::RunReport,
+    ) {
         Ok(parsed) => parsed,
         Err(code) => return code,
     };
 
-    crate::evaluator::run(&path, &commands, args.json, args.quiet)
+    crate::evaluator::run(&path, &commands, args.json, args.quiet, args.timeout)
 }
 
 fn check(args: CheckArgs) -> i32 {
-    let (_, commands) = match load_and_parse("check", args.tape.as_deref(), args.json) {
+    let (_, commands) = match load_and_parse(
+        "check",
+        args.tape.as_deref(),
+        args.json,
+        JsonShape::ParseResult,
+    ) {
         Ok(parsed) => parsed,
         Err(code) => return code,
     };

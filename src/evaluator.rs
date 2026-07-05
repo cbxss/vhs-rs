@@ -21,6 +21,7 @@ use crate::theme::{self, Rgb, Theme};
 use crate::token::TokenType;
 use crate::util::parse_duration;
 use regex::Regex;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -63,15 +64,40 @@ impl Default for Settings {
 }
 
 /// Outcome of a single failed step, mapped to the exit taxonomy. The report
-/// `reason` derives from `exit` ([`ExitKind::reason`]).
+/// `reason` derives from `exit` ([`ExitKind::reason`]) unless `reason`
+/// overrides it with a more specific taxonomy entry (e.g. `child_exited`).
 struct StepFailure {
     exit: ExitKind,
+    reason: Option<&'static str>,
     message: String,
     detail: Option<serde_json::Value>,
 }
 
-/// Entry point called by the CLI after parse+validate succeeded.
-pub fn run(tape_name: &str, commands: &[Command], json: bool, quiet: bool) -> i32 {
+/// What ended a [`wait_for`]: the pattern matched, the deadline passed, or
+/// the child exited (and the pattern can never match).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitOutcome {
+    Matched,
+    TimedOut,
+    ChildExited,
+}
+
+/// How the run future ended: normally, or preempted by a signal.
+enum RunOutcome {
+    Finished(ExitKind),
+    Interrupted(&'static str),
+}
+
+/// Entry point called by the CLI after parse+validate succeeded. `timeout`
+/// is the whole-run wall-clock budget (`--timeout`); on SIGINT/SIGTERM the
+/// report is still finalized and printed before exiting.
+pub fn run(
+    tape_name: &str,
+    commands: &[Command],
+    json: bool,
+    quiet: bool,
+    timeout: Option<Duration>,
+) -> i32 {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -84,7 +110,34 @@ pub fn run(tape_name: &str, commands: &[Command], json: bool, quiet: bool) -> i3
     };
 
     let mut report = ReportBuilder::new(tape_name);
-    let exit = rt.block_on(run_inner(tape_name, commands, &mut report, quiet));
+    let outcome = rt.block_on(async {
+        let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
+        let fut = run_inner(tape_name, commands, &mut report, quiet, deadline);
+        use tokio::signal::unix::{SignalKind, signal};
+        let (Ok(mut sigterm), Ok(mut sigint)) = (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        ) else {
+            return RunOutcome::Finished(fut.await);
+        };
+        tokio::pin!(fut);
+        tokio::select! {
+            exit = &mut fut => RunOutcome::Finished(exit),
+            _ = sigterm.recv() => RunOutcome::Interrupted("SIGTERM"),
+            _ = sigint.recv() => RunOutcome::Interrupted("SIGINT"),
+        }
+    });
+    let exit = match outcome {
+        RunOutcome::Finished(exit) => exit,
+        RunOutcome::Interrupted(sig) => {
+            report.set_failure(
+                None,
+                "interrupted",
+                format!("run interrupted by {sig}; partial report follows"),
+            );
+            ExitKind::Runtime
+        }
+    };
     let report = report.finish(exit);
 
     if json {
@@ -106,6 +159,7 @@ async fn run_inner(
     commands: &[Command],
     report: &mut ReportBuilder,
     quiet: bool,
+    deadline: Option<tokio::time::Instant>,
 ) -> ExitKind {
     // ---- Typed resolution side table: everything the parser already
     // validated (durations, counts, Wait/Assert scopes and regexes) lifted
@@ -136,7 +190,14 @@ async fn run_inner(
                 }
             }
             TokenType::Require => {
-                if which(&cmd.args).is_none() {
+                // Search the PATH the child will actually see: an earlier
+                // `Env PATH` overrides the inherited one.
+                let env_path = spawn_env
+                    .iter()
+                    .rev()
+                    .find(|(k, _)| k == "PATH")
+                    .map(|(_, v)| v.as_str());
+                if which(&cmd.args, env_path).is_none() {
                     report.set_failure(
                         None,
                         ExitKind::Runtime.reason(),
@@ -201,22 +262,46 @@ async fn run_inner(
     let mut registry = ArtifactRegistry::new(&outputs, tape_name, quiet);
 
     // Implicit initial wait for the prompt — removes the classic race where
-    // typing starts before the shell is up. Non-fatal: warn and continue.
-    if !wait_for(
-        &mut session,
-        Scope::Line,
-        &settings.wait_pattern.clone(),
-        settings.wait_timeout,
+    // typing starts before the shell is up. A missing prompt is a warning
+    // (custom shells may prompt differently), but a child that already
+    // exited can never run anything: without this check a typo'd
+    // `Set Shell` would sail through to a false success, because writes
+    // into a dead PTY still land in the kernel buffer.
+    let initial_wait = with_deadline(
+        deadline,
+        wait_for(
+            &mut session,
+            Scope::Line,
+            &settings.wait_pattern.clone(),
+            settings.wait_timeout,
+        ),
     )
-    .await
-    .unwrap_or(false)
-        && !quiet
-    {
-        eprintln!(
-            "vhs-rs: warning: prompt did not match /{}/ within {:?}; continuing",
-            settings.wait_pattern.as_str(),
-            settings.wait_timeout
-        );
+    .await;
+    match initial_wait {
+        None => {
+            report.set_failure(
+                None,
+                "run_timeout",
+                "--timeout exceeded while waiting for the initial prompt".to_string(),
+            );
+            return ExitKind::Runtime;
+        }
+        Some(Ok(WaitOutcome::ChildExited)) => {
+            report.set_failure(
+                None,
+                "child_exited",
+                format!("shell {argv:?} exited before the tape started (bad Set Shell?)"),
+            );
+            return ExitKind::Runtime;
+        }
+        Some(Ok(WaitOutcome::TimedOut)) | Some(Err(_)) if !quiet => {
+            eprintln!(
+                "vhs-rs: warning: prompt did not match /{}/ within {:?}; continuing",
+                settings.wait_pattern.as_str(),
+                settings.wait_timeout
+            );
+        }
+        _ => {}
     }
 
     // ---- Command loop.
@@ -226,19 +311,30 @@ async fn run_inner(
 
     for (index, (cmd, res)) in commands.iter().zip(resolved.iter()).enumerate() {
         let step_start = Instant::now();
-        let result = execute(
-            cmd,
-            res,
-            &mut session,
-            &mut settings,
-            &mut renderer,
-            &mut clipboard,
-            &mut theme_timeline,
-            &mut registry,
-            index,
-            quiet,
+        let result = with_deadline(
+            deadline,
+            execute(
+                cmd,
+                res,
+                &mut session,
+                &mut settings,
+                &mut renderer,
+                &mut clipboard,
+                &mut theme_timeline,
+                &mut registry,
+                index,
+                quiet,
+            ),
         )
-        .await;
+        .await
+        .unwrap_or_else(|| {
+            Err(StepFailure {
+                exit: ExitKind::Runtime,
+                reason: Some("run_timeout"),
+                message: "--timeout exceeded; aborting the run".to_string(),
+                detail: None,
+            })
+        });
 
         let elapsed = step_start.elapsed();
         match result {
@@ -247,7 +343,8 @@ async fn run_inner(
             }
             Err(fail) => {
                 report.record(index, cmd, CommandStatus::Failed, elapsed, fail.detail);
-                report.set_failure(Some(index), fail.exit.reason(), fail.message);
+                let reason = fail.reason.unwrap_or_else(|| fail.exit.reason());
+                report.set_failure(Some(index), reason, fail.message);
                 exit = fail.exit;
                 // Everything after the failed command never ran.
                 for (rest_index, rest_cmd) in commands.iter().enumerate().skip(index + 1) {
@@ -465,26 +562,44 @@ async fn execute(
             let regex = regex.as_ref().unwrap_or(&settings.wait_pattern);
             let timeout = timeout.unwrap_or(settings.wait_timeout);
             let started = Instant::now();
-            if wait_for(session, scope, regex, timeout)
+            match wait_for(session, scope, regex, timeout)
                 .await
                 .map_err(io_fail)?
             {
-                Ok(Some(match_detail(scope, regex, Some(started.elapsed()))))
-            } else {
-                let seen = scope.text(session.term());
-                let message = format!(
-                    "timeout waiting for /{}/ to match {}; last value was: {}",
-                    regex.as_str(),
-                    scope.name(),
-                    seen.lines().last().unwrap_or("")
-                );
-                Err(match_failure(
-                    ExitKind::WaitTimeout,
-                    scope,
-                    regex,
-                    seen,
-                    message,
-                ))
+                WaitOutcome::Matched => {
+                    Ok(Some(match_detail(scope, regex, Some(started.elapsed()))))
+                }
+                WaitOutcome::TimedOut => {
+                    let message = format!(
+                        "timeout waiting for /{}/ to match {}; last value was: {}",
+                        regex.as_str(),
+                        scope.name(),
+                        scope.text(session.term()).lines().last().unwrap_or("")
+                    );
+                    Err(match_failure(
+                        ExitKind::WaitTimeout,
+                        None,
+                        scope,
+                        regex,
+                        session.term(),
+                        message,
+                    ))
+                }
+                WaitOutcome::ChildExited => {
+                    let message = format!(
+                        "child exited while waiting for /{}/ to match {}",
+                        regex.as_str(),
+                        scope.name(),
+                    );
+                    Err(match_failure(
+                        ExitKind::Runtime,
+                        Some("child_exited"),
+                        scope,
+                        regex,
+                        session.term(),
+                        message,
+                    ))
+                }
             }
         }
 
@@ -499,26 +614,42 @@ async fn execute(
             };
             let scope = *scope;
             let regex = regex.as_ref().unwrap_or(&settings.wait_pattern);
-            let matched = match timeout {
+            let outcome = match timeout {
                 // No timeout: a single immediate check.
                 None => {
                     let _ = session.drain();
-                    regex.is_match(&scope.text(session.term()))
+                    if regex.is_match(&scope.text(session.term())) {
+                        WaitOutcome::Matched
+                    } else {
+                        WaitOutcome::TimedOut
+                    }
                 }
                 Some(timeout) => wait_for(session, scope, regex, *timeout)
                     .await
                     .map_err(io_fail)?,
             };
-            if matched {
+            if outcome == WaitOutcome::Matched {
                 Ok(Some(match_detail(scope, regex, None)))
             } else {
-                let seen = scope.text(session.term());
-                let message = format!("Assert /{}/ did not match {}", regex.as_str(), scope.name());
+                // A dead child still fails the *assertion* (exit 1): the
+                // pattern genuinely isn't on the final screen. The message
+                // carries the child-exited hint.
+                let message = format!(
+                    "Assert /{}/ did not match {}{}",
+                    regex.as_str(),
+                    scope.name(),
+                    if outcome == WaitOutcome::ChildExited {
+                        " (child exited before the deadline)"
+                    } else {
+                        ""
+                    }
+                );
                 Err(match_failure(
                     ExitKind::AssertFailed,
+                    None,
                     scope,
                     regex,
-                    seen,
+                    session.term(),
                     message,
                 ))
             }
@@ -616,44 +747,69 @@ fn match_detail(scope: Scope, regex: &Regex, elapsed: Option<Duration>) -> serde
     detail
 }
 
-/// `StepFailure` for a Wait timeout / Assert mismatch, with the screen text
-/// the check actually saw.
+/// `StepFailure` for a Wait timeout / Assert mismatch. `screen_text` always
+/// carries the full screen at check time (the agent's primary evidence);
+/// Line-scoped checks additionally get `line_text`, the line the regex was
+/// actually matched against.
 fn match_failure(
     exit: ExitKind,
+    reason: Option<&'static str>,
     scope: Scope,
     regex: &Regex,
-    seen: String,
+    term: &Term,
     message: String,
 ) -> StepFailure {
+    let mut detail = serde_json::json!({
+        "scope": scope.name(), "regex": regex.as_str(),
+        "matched": false, "screen_text": term.text(),
+    });
+    if scope == Scope::Line {
+        detail["line_text"] = term.current_line().into();
+    }
     StepFailure {
         exit,
+        reason,
         message,
-        detail: Some(serde_json::json!({
-            "scope": scope.name(), "regex": regex.as_str(),
-            "matched": false, "screen_text": seen,
-        })),
+        detail: Some(detail),
     }
 }
 
 /// Event-driven wait: check, then await the next output chunk, re-check.
-/// Returns Ok(false) on timeout or if the child exits without matching.
+/// Distinguishes a passed deadline from a child that exited without ever
+/// matching — the two need different remediation (longer timeout vs. a
+/// dead session), so they must not collapse into one "timeout".
 async fn wait_for(
     session: &mut Session,
     scope: Scope,
     regex: &Regex,
     timeout: Duration,
-) -> std::io::Result<bool> {
+) -> std::io::Result<WaitOutcome> {
     let deadline = Instant::now() + timeout;
     loop {
         session.drain()?;
         if regex.is_match(&scope.text(session.term())) {
-            return Ok(true);
+            return Ok(WaitOutcome::Matched);
+        }
+        if session.exited() {
+            return Ok(WaitOutcome::ChildExited);
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() || session.exited() {
-            return Ok(false);
+        if remaining.is_zero() {
+            return Ok(WaitOutcome::TimedOut);
         }
         session.wait_change(remaining).await?;
+    }
+}
+
+/// Runs `fut` under the optional whole-run deadline (`--timeout`); `None`
+/// means the deadline elapsed before `fut` completed.
+async fn with_deadline<T>(
+    deadline: Option<tokio::time::Instant>,
+    fut: impl Future<Output = T>,
+) -> Option<T> {
+    match deadline {
+        None => Some(fut.await),
+        Some(d) => tokio::time::timeout_at(d, fut).await.ok(),
     }
 }
 
@@ -883,16 +1039,17 @@ fn apply_setting(settings: &mut Settings, cmd: &Command, quiet: bool) {
         "BorderRadius" => set_usize(&mut settings.render.border_radius, v),
         "LetterSpacing" => set_f32(&mut settings.render.letter_spacing, v),
         "LineHeight" => set_f32(&mut settings.render.line_height, v),
-        "TypingSpeed" => {
-            if let Some(d) = parse_duration(v) {
-                settings.typing_speed = d;
-            }
-        }
+        "TypingSpeed" => match parse_duration(v) {
+            Some(d) => settings.typing_speed = d,
+            None => warn(format!("TypingSpeed {v}: not a duration; ignored")),
+        },
         "PlaybackSpeed" => {
             if let Ok(f) = v.parse::<f64>()
                 && f > 0.0
             {
                 settings.playback_speed = f;
+            } else {
+                warn(format!("PlaybackSpeed {v}: not a positive number; ignored"));
             }
         }
         "Framerate" => {
@@ -900,18 +1057,18 @@ fn apply_setting(settings: &mut Settings, cmd: &Command, quiet: bool) {
                 && f > 0.0
             {
                 settings.max_fps = f.min(50.0);
+            } else {
+                warn(format!("Framerate {v}: not a positive number; ignored"));
             }
         }
-        "WaitTimeout" => {
-            if let Some(d) = parse_duration(v) {
-                settings.wait_timeout = d;
-            }
-        }
-        "WaitPattern" => {
-            if let Ok(re) = Regex::new(v) {
-                settings.wait_pattern = re;
-            }
-        }
+        "WaitTimeout" => match parse_duration(v) {
+            Some(d) => settings.wait_timeout = d,
+            None => warn(format!("WaitTimeout {v}: not a duration; ignored")),
+        },
+        "WaitPattern" => match Regex::new(v) {
+            Ok(re) => settings.wait_pattern = re,
+            Err(_) => warn(format!("WaitPattern {v}: not a valid regex; ignored")),
+        },
         "Theme" => {
             let parsed = if v.trim_start().starts_with('{') {
                 theme::from_json(v).ok()
@@ -969,11 +1126,19 @@ fn shell_argv(shell: &str) -> Vec<String> {
     }
 }
 
-fn which(bin: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(bin))
-        .find(|p| p.is_file())
+/// Finds `bin` on `env_path` (the child's `Env PATH` override) or the
+/// inherited PATH. Only executable regular files count — a data file that
+/// happens to share the binary's name must not satisfy `Require`.
+fn which(bin: &str, env_path: Option<&str>) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = env_path
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"))?;
+    std::env::split_paths(&path).map(|dir| dir.join(bin)).find(|p| {
+        p.is_file()
+            && p.metadata()
+                .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+    })
 }
 
 fn io_fail(e: std::io::Error) -> StepFailure {
@@ -983,6 +1148,7 @@ fn io_fail(e: std::io::Error) -> StepFailure {
 fn runtime_fail(message: String) -> StepFailure {
     StepFailure {
         exit: ExitKind::Runtime,
+        reason: None,
         message,
         detail: None,
     }

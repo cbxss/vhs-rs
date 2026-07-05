@@ -1,6 +1,6 @@
 [package]
 name = "vhs-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 # Floor set by let-chains (1.88); edition 2024 alone would imply 1.85.
 rust-version = "1.88"
