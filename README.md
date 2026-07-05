@@ -152,12 +152,20 @@ Env LS_COLORS "di=01;34:ex=01;32"
 
 ## Installation
 
-You'll need a Rust toolchain to build, and a Unix system with `bash` to run.
+One line (Linux x86_64 and Apple Silicon; installs to `~/.local/bin`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/cbxss/vhs-rs/main/install.sh | sh
+```
+
+Or grab a tarball from the [releases page](https://github.com/cbxss/vhs-rs/releases).
+
+Or build from source (any Unix with a Rust toolchain; running needs only `bash`):
 
 ```sh
 git clone https://github.com/cbxss/vhs-rs && cd vhs-rs
 cargo build --release
-# → target/release/vhs-rs (~8 MB, no runtime dependencies)
+# → target/release/vhs-rs — one file, no runtime dependencies
 ```
 
 ## The tape language

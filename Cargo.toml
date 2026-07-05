@@ -2,8 +2,14 @@
 name = "vhs-rs"
 version = "0.1.0"
 edition = "2024"
+# Floor set by let-chains (1.88); edition 2024 alone would imply 1.85.
+rust-version = "1.88"
 description = "Agent-first terminal automation: VHS-compatible tapes, screenshots, GIFs — no browser"
 license = "MIT"
+repository = "https://github.com/cbxss/vhs-rs"
+readme = "README.md"
+keywords = ["terminal", "gif", "testing", "vhs", "pty"]
+categories = ["command-line-utilities", "development-tools::testing"]
 
 [dependencies]
 avt = "0.18"
@@ -25,3 +31,12 @@ path = "src/lib.rs"
 [[bin]]
 name = "vhs-rs"
 path = "src/main.rs"
+
+# Tests and dev builds use the dev profile; nothing in the crate relies on
+# unwinding (no catch_unwind anywhere), so aborting on panic is safe and
+# shrinks the binary.
+[profile.release]
+lto = "thin"
+strip = "symbols"
+codegen-units = 1
+panic = "abort"
