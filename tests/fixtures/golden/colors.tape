@@ -9,7 +9,7 @@ Set Height 400
 Set TypingSpeed 10ms
 Set WaitTimeout 10s
 
-# vterm pins TERM/LANG/LC_ALL/PS1 but inherits the rest of the environment;
+# vhs-rs pins TERM/LANG/LC_ALL/PS1 but inherits the rest of the environment;
 # pin LS_COLORS so `ls --color` paints identically on every machine.
 Env LS_COLORS "di=01;34:ex=01;32"
 

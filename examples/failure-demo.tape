@@ -1,7 +1,7 @@
-# failure-demo.tape — a deliberately failing Assert, to demonstrate vterm's
+# failure-demo.tape — a deliberately failing Assert, to demonstrate vhs-rs's
 # failure forensics. This tape is SUPPOSED to fail.
 #
-#   vterm run --json examples/failure-demo.tape ; echo "exit: $?"
+#   vhs-rs run --json examples/failure-demo.tape ; echo "exit: $?"
 #
 # Expected outcome:
 #   * exit code 1 (assert failure)

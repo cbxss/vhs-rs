@@ -1,5 +1,5 @@
 [package]
-name = "vterm"
+name = "vhs-rs"
 version = "0.1.0"
 edition = "2024"
 description = "Agent-first terminal automation: VHS-compatible tapes, screenshots, GIFs — no browser"
@@ -19,9 +19,9 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net", "io-util", "signal"] }
 
 [lib]
-name = "vterm"
+name = "vhs_rs"
 path = "src/lib.rs"
 
 [[bin]]
-name = "vterm"
+name = "vhs-rs"
 path = "src/main.rs"

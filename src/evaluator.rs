@@ -76,7 +76,7 @@ pub fn run(tape_name: &str, commands: &[Command], json: bool, quiet: bool) -> i3
     {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("vterm: failed to start runtime: {e}");
+            eprintln!("vhs-rs: failed to start runtime: {e}");
             return ExitKind::Runtime as i32;
         }
     };
@@ -89,7 +89,7 @@ pub fn run(tape_name: &str, commands: &[Command], json: bool, quiet: bool) -> i3
         println!("{}", report.to_json());
     } else if !quiet {
         if let Some(f) = &report.failure {
-            eprintln!("vterm: {} — {}", f.reason, f.message);
+            eprintln!("vhs-rs: {} — {}", f.reason, f.message);
         }
         for a in &report.artifacts {
             eprintln!("  wrote {}", a.path);
@@ -158,7 +158,7 @@ async fn run_inner(
         ("HISTFILE".to_string(), String::new()),
         ("LANG".to_string(), "C.UTF-8".to_string()),
         ("LC_ALL".to_string(), "C.UTF-8".to_string()),
-        ("VTERM".to_string(), "1".to_string()),
+        ("VHS_RS".to_string(), "1".to_string()),
     ];
     env.extend(spawn_env);
 
@@ -203,7 +203,7 @@ async fn run_inner(
         && !quiet
     {
         eprintln!(
-            "vterm: warning: prompt did not match /{}/ within {:?}; continuing",
+            "vhs-rs: warning: prompt did not match /{}/ within {:?}; continuing",
             settings.wait_pattern.as_str(),
             settings.wait_timeout
         );
@@ -345,7 +345,7 @@ async fn execute(
         Env => {
             if !quiet {
                 eprintln!(
-                    "vterm: warning: Env after commands started has no effect (line {})",
+                    "vhs-rs: warning: Env after commands started has no effect (line {})",
                     cmd.token.line
                 );
             }
@@ -392,7 +392,7 @@ async fn execute(
                 }
             } else if !quiet {
                 eprintln!(
-                    "vterm: warning: {}: child has not enabled mouse reporting; ignored",
+                    "vhs-rs: warning: {}: child has not enabled mouse reporting; ignored",
                     cmd.command_type
                 );
             }
@@ -506,7 +506,7 @@ async fn execute(
             if golden_paths.contains(txt_str.as_ref()) {
                 if !quiet {
                     eprintln!(
-                        "vterm: warning: screenshot text sibling {txt_str} collides with an Output golden target; skipped"
+                        "vhs-rs: warning: screenshot text sibling {txt_str} collides with an Output golden target; skipped"
                     );
                 }
             } else {
@@ -800,14 +800,14 @@ fn apply_setting(settings: &mut Settings, cmd: &Command, quiet: bool) {
     let v = cmd.args.as_str();
     let warn = |msg: String| {
         if !quiet {
-            eprintln!("vterm: warning: {msg}");
+            eprintln!("vhs-rs: warning: {msg}");
         }
     };
     match cmd.options.as_str() {
         "Shell" => settings.shell = v.into(),
         "FontSize" => set_f32(&mut settings.render.font_size, v),
         "FontFamily" => warn(format!(
-            "Set FontFamily {v}: vterm uses the embedded JetBrains Mono; ignored"
+            "Set FontFamily {v}: vhs_rs uses the embedded JetBrains Mono; ignored"
         )),
         "Width" => set_usize(&mut settings.render.width, v),
         "Height" => set_usize(&mut settings.render.height, v),

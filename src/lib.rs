@@ -1,4 +1,4 @@
-//! vterm — agent-first terminal automation.
+//! vhs_rs — agent-first terminal automation.
 //!
 //! Executes VHS-compatible `.tape` scripts against a real PTY, models the
 //! screen with an offscreen terminal emulator, supports event-driven `Wait`
@@ -39,7 +39,7 @@ pub mod report;
 
 use error::ParseError;
 
-/// Parses a tape and runs vterm's validation pass; returns the commands and
+/// Parses a tape and runs vhs_rs's validation pass; returns the commands and
 /// all parse + validation errors (empty when the tape is clean).
 pub fn parse_tape(src: &str) -> (Vec<command::Command>, Vec<ParseError>) {
     let mut p = parser::Parser::new(src);

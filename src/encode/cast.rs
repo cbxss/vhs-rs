@@ -144,7 +144,7 @@ mod tests {
 
     fn tmp_path(name: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("vterm-cast-test-{}", std::process::id()));
+        p.push(format!("vhs_rs-cast-test-{}", std::process::id()));
         p.push(name); // nested: exercises create_dir_all
         p
     }

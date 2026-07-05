@@ -1,6 +1,6 @@
 //! Token types for the VHS-compatible tape language.
 //!
-//! Ported from vhs/token/token.go, with vterm extensions: `Assert`, `Capture`,
+//! Ported from vhs/token/token.go, with vhs_rs extensions: `Assert`, `Capture`,
 //! and a working `Home` keyword (VHS defines the token but never wires it up).
 
 /// A token's type.
@@ -91,7 +91,7 @@ pub enum TokenType {
     WaitPattern,
     CursorBlink,
 
-    // vterm extensions
+    // vhs_rs extensions
     Assert,
     Capture,
 }

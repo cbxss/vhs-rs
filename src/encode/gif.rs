@@ -644,7 +644,7 @@ mod tests {
 
     fn tmp_path(name: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("vterm-gif-test-{}-{name}", std::process::id()));
+        p.push(format!("vhs_rs-gif-test-{}-{name}", std::process::id()));
         p
     }
 

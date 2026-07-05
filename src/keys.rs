@@ -1,7 +1,7 @@
 //! Key and chord encoding: tape key commands → raw PTY byte sequences.
 //!
 //! Replaces VHS's browser key events: instead of synthesizing DOM keydowns
-//! into xterm.js, vterm writes the escape sequences a terminal would send
+//! into xterm.js, vhs_rs writes the escape sequences a terminal would send
 //! directly to the child's PTY.
 //!
 //! Arrow/Home/End encoding depends on DECCKM (application cursor keys mode,

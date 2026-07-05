@@ -1,6 +1,6 @@
 # unicode.tape — non-ASCII content: double-width CJK cells, combining-free
 # accented Latin, arrows, and box drawing. LANG/LC_ALL are pinned to C.UTF-8
-# by vterm, so this renders identically everywhere.
+# by vhs-rs, so this renders identically everywhere.
 
 Output unicode.txt
 

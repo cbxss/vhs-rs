@@ -1,3 +1,3 @@
 fn main() {
-    std::process::exit(vterm::cli::main());
+    std::process::exit(vhs_rs::cli::main());
 }

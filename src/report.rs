@@ -1,4 +1,4 @@
-//! The machine-readable run report — the core of vterm's agent contract.
+//! The machine-readable run report — the core of vhs_rs's agent contract.
 //!
 //! One JSON object describing everything that happened in a run: per-command
 //! status and timing, Wait/Assert outcomes with the actual screen text at

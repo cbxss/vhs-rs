@@ -1,7 +1,7 @@
 //! The parsed command model.
 //!
 //! Mirrors VHS's `parser.Command` (stringly options/args keep the grammar port
-//! 1:1 and the ported tests valid); vterm additionally carries the originating
+//! 1:1 and the ported tests valid); vhs_rs additionally carries the originating
 //! token so runtime errors and JSON reports can cite line:column.
 
 use crate::token::{Token, TokenType};

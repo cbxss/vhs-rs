@@ -1,8 +1,8 @@
-//! Command-line interface: `vterm run` / `vterm check`.
+//! Command-line interface: `vhs_rs run` / `vhs_rs check`.
 //!
-//! `vterm <tape>` is shorthand for `vterm run <tape>`. Both subcommands accept
+//! `vhs_rs <tape>` is shorthand for `vhs_rs run <tape>`. Both subcommands accept
 //! `-` to read the tape from stdin, and `--json` for machine-readable output
-//! (vterm's primary consumer is an AI agent, so exit codes and JSON shape are
+//! (vhs_rs's primary consumer is an AI agent, so exit codes and JSON shape are
 //! part of the stable contract).
 
 use std::io::Read as _;
@@ -21,7 +21,7 @@ Exit codes:
 
 #[derive(Parser)]
 #[command(
-    name = "vterm",
+    name = "vhs-rs",
     version,
     about = "Agent-first terminal automation: VHS-compatible tapes, screenshots, GIFs — no browser",
     after_help = EXIT_CODES_HELP,
@@ -31,7 +31,7 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Cmd>,
 
-    /// Tape file to run (`-` for stdin); shorthand for `vterm run <tape>`
+    /// Tape file to run (`-` for stdin); shorthand for `vhs_rs run <tape>`
     #[command(flatten)]
     run: RunArgs,
 }
@@ -95,10 +95,10 @@ fn read_tape(path: &str) -> Result<String, String> {
         let mut buf = String::new();
         std::io::stdin()
             .read_to_string(&mut buf)
-            .map_err(|e| format!("vterm: failed to read tape from stdin: {e}"))?;
+            .map_err(|e| format!("vhs-rs: failed to read tape from stdin: {e}"))?;
         Ok(buf)
     } else {
-        std::fs::read_to_string(path).map_err(|e| format!("vterm: failed to read tape {path}: {e}"))
+        std::fs::read_to_string(path).map_err(|e| format!("vhs-rs: failed to read tape {path}: {e}"))
     }
 }
 
@@ -122,7 +122,7 @@ fn parse_result_json(commands: usize, errors: &[ParseError]) -> serde_json::Valu
 
 fn run(args: RunArgs) -> i32 {
     let Some(path) = args.tape.as_deref() else {
-        eprintln!("vterm: no tape given; usage: vterm run <tape|-> (see --help)");
+        eprintln!("vhs-rs: no tape given; usage: vhs_rs run <tape|-> (see --help)");
         return ExitKind::Parse as i32;
     };
 
@@ -149,7 +149,7 @@ fn run(args: RunArgs) -> i32 {
 
 fn check(args: CheckArgs) -> i32 {
     let Some(path) = args.tape.as_deref() else {
-        eprintln!("vterm: no tape given; usage: vterm check <tape|-> (see --help)");
+        eprintln!("vhs-rs: no tape given; usage: vhs_rs check <tape|-> (see --help)");
         return ExitKind::Parse as i32;
     };
 

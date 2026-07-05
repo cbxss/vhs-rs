@@ -1,6 +1,6 @@
 //! Error taxonomy and the caret-underline parse error renderer.
 //!
-//! Exit codes are part of vterm's agent contract:
+//! Exit codes are part of vhs_rs's agent contract:
 //! 0 success · 1 assert failure · 2 parse/validation error · 3 wait timeout ·
 //! 4 runtime/IO error.
 

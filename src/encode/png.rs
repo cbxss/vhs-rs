@@ -123,7 +123,7 @@ mod tests {
             },
         };
         let canvas = r.render(&snap);
-        let path = std::env::temp_dir().join("vterm-smoke.png");
+        let path = std::env::temp_dir().join("vhs_rs-smoke.png");
         write_png(&path, canvas).unwrap();
         println!("wrote {}", path.display());
     }
@@ -133,7 +133,7 @@ mod tests {
         let mut canvas = Canvas::new(8, 8);
         canvas.fill(Rgb(9, 9, 9));
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("vterm-png-test-{}.png", std::process::id()));
+        let path = dir.join(format!("vhs_rs-png-test-{}.png", std::process::id()));
         write_png(&path, &canvas).unwrap();
         let file = std::fs::File::open(&path).unwrap();
         let mut reader = png::Decoder::new(std::io::BufReader::new(file))

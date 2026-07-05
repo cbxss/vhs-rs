@@ -3,7 +3,7 @@
 # `Set Theme` is one of the few settings allowed mid-tape (it does not change
 # terminal geometry), so a single run can produce one screenshot per theme.
 #
-#   vterm run examples/theme-gallery.tape
+#   vhs-rs run examples/theme-gallery.tape
 
 Set TypingSpeed 20ms
 

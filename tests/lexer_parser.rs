@@ -1,11 +1,11 @@
 //! Lexer + parser integration tests, ported from VHS's Go test suites
-//! (vhs/lexer/lexer_test.go, vhs/parser/parser_test.go), plus vterm-specific
+//! (vhs/lexer/lexer_test.go, vhs/parser/parser_test.go), plus vhs_rs-specific
 //! tests for the Assert/Capture extensions and the validate() pass.
 
-use vterm::lexer::Lexer;
-use vterm::parser::{Parser, validate};
-use vterm::token::TokenType;
-use vterm::{command::Command, parse_tape};
+use vhs_rs::lexer::Lexer;
+use vhs_rs::parser::{Parser, validate};
+use vhs_rs::token::TokenType;
+use vhs_rs::{command::Command, parse_tape};
 
 use TokenType::*;
 
@@ -517,7 +517,7 @@ Sleep Bar";
 }
 
 /// Port of TestParseTapeFile (vhs/parser/parser_test.go). Note: .mp4/.webm
-/// outputs DO parse — vterm rejects them in the separate validate() pass.
+/// outputs DO parse — vhs_rs rejects them in the separate validate() pass.
 #[test]
 fn test_parse_tape_file() {
     let input = fixture_all_tape();
@@ -747,7 +747,7 @@ struct TempTape(std::path::PathBuf);
 impl TempTape {
     fn new(tag: &str, ext: &str, contents: &str) -> Self {
         let path = std::env::temp_dir().join(format!(
-            "vterm_test_{}_{}_{tag}.{ext}",
+            "vhs_rs_test_{}_{}_{tag}.{ext}",
             std::process::id(),
             std::thread::current()
                 .name()
@@ -769,7 +769,7 @@ impl Drop for TempTape {
     }
 }
 
-fn parse_errors_of(tape: &str) -> Vec<vterm::error::ParseError> {
+fn parse_errors_of(tape: &str) -> Vec<vhs_rs::error::ParseError> {
     let mut p = Parser::new(tape);
     let _ = p.parse();
     p.into_errors()
@@ -797,7 +797,7 @@ fn test_parse_source_ok() {
 #[test]
 fn test_parse_source_not_found() {
     let missing = std::env::temp_dir().join(format!(
-        "vterm_test_{}_source_missing.tape",
+        "vhs_rs_test_{}_source_missing.tape",
         std::process::id()
     ));
     let missing = missing.to_string_lossy().into_owned();
@@ -846,7 +846,7 @@ fn test_parse_screenshot() {
 }
 
 // ---------------------------------------------------------------------------
-// vterm extensions: Assert, Capture, validate(), Home
+// vhs_rs extensions: Assert, Capture, validate(), Home
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -952,7 +952,7 @@ fn test_validate_directly() {
     );
 }
 
-/// vterm fix over VHS: `Home` is a working keypress (VHS defines the token but
+/// vhs_rs fix over VHS: `Home` is a working keypress (VHS defines the token but
 /// never wires it into the parser).
 #[test]
 fn test_home_keypress() {

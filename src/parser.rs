@@ -2,8 +2,8 @@
 //!
 //! Faithful port of vhs/parser/parser.go (two-token lookahead recursive
 //! descent), extended with `Assert` and `Capture`, plus a `validate` pass that
-//! rejects things VHS accepts but vterm cannot execute (video outputs,
-//! mid-tape geometry changes) so `vterm check` catches them before a run.
+//! rejects things VHS accepts but vhs_rs cannot execute (video outputs,
+//! mid-tape geometry changes) so `vhs_rs check` catches them before a run.
 
 use crate::command::Command;
 use crate::error::ParseError;
@@ -155,7 +155,7 @@ impl<'a> Parser<'a> {
         cmd
     }
 
-    /// `Assert[+Screen|+Line][@<timeout>] /regex/` — vterm extension.
+    /// `Assert[+Screen|+Line][@<timeout>] /regex/` — vhs_rs extension.
     ///
     /// Default scope is Screen. Without a timeout the check is immediate; with
     /// one it retries event-driven until the deadline. The regex is required.
@@ -696,7 +696,7 @@ impl<'a> Parser<'a> {
         cmd
     }
 
-    /// `Capture <path>.txt` — vterm extension: dump the screen as plain text.
+    /// `Capture <path>.txt` — vhs_rs extension: dump the screen as plain text.
     fn parse_capture(&mut self) -> Command {
         let mut cmd = Command::new(TokenType::Capture, self.cur.clone());
 
@@ -730,7 +730,7 @@ fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Output extensions vterm can produce.
+/// Output extensions vhs_rs can produce.
 const SUPPORTED_OUTPUTS: &[&str] = &[".gif", ".png", ".txt", ".ascii", ".test", ".cast"];
 
 /// Settings that may change mid-tape (everything else is frozen once the
@@ -742,8 +742,8 @@ fn is_runtime_setting(name: &str) -> bool {
     )
 }
 
-/// Post-parse validation: catches VHS-grammar-valid constructs that vterm
-/// cannot execute, so `vterm check` fails fast with precise positions.
+/// Post-parse validation: catches VHS-grammar-valid constructs that vhs_rs
+/// cannot execute, so `vhs_rs check` fails fast with precise positions.
 pub fn validate(commands: &[Command]) -> Vec<ParseError> {
     let mut errors = Vec::new();
     let mut started = false;
@@ -755,13 +755,13 @@ pub fn validate(commands: &[Command]) -> Vec<ParseError> {
                 if cmd.args.ends_with('/') {
                     errors.push(ParseError::new(
                         cmd.token.clone(),
-                        "PNG frame directories are not supported by vterm",
+                        "PNG frame directories are not supported by vhs_rs",
                     ));
                 } else if ext == ".mp4" || ext == ".webm" {
                     errors.push(ParseError::new(
                         cmd.token.clone(),
                         format!(
-                            "video output ({}) requires ffmpeg; vterm supports {}",
+                            "video output ({}) requires ffmpeg; vhs_rs supports {}",
                             ext,
                             SUPPORTED_OUTPUTS.join("/")
                         ),
@@ -770,7 +770,7 @@ pub fn validate(commands: &[Command]) -> Vec<ParseError> {
                     errors.push(ParseError::new(
                         cmd.token.clone(),
                         format!(
-                            "unsupported output format {}; vterm supports {}",
+                            "unsupported output format {}; vhs_rs supports {}",
                             ext,
                             SUPPORTED_OUTPUTS.join("/")
                         ),

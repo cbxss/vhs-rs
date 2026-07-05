@@ -48,5 +48,5 @@ jobs:
           cargo build --release
           for tape in examples/*.tape; do
             echo "== $tape"
-            ./target/release/vterm check "$tape"
+            ./target/release/vhs-rs check "$tape"
           done

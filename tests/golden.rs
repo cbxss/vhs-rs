@@ -1,4 +1,4 @@
-//! Byte-exact golden tests for vterm's deterministic `.txt` output.
+//! Byte-exact golden tests for vhs_rs's deterministic `.txt` output.
 //!
 //! For every `tests/fixtures/golden/<name>.tape`, run the built binary in a
 //! scratch directory and compare the produced `<name>.txt` byte-for-byte
@@ -27,7 +27,7 @@ fn fixture_dir() -> PathBuf {
 
 /// Fresh scratch directory for one test run (std-only; no tempfile dep).
 fn scratch_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("vterm-golden-{}-{}", name, std::process::id()));
+    let dir = std::env::temp_dir().join(format!("vhs_rs-golden-{}-{}", name, std::process::id()));
     if dir.exists() {
         fs::remove_dir_all(&dir).expect("clear stale scratch dir");
     }
@@ -40,16 +40,16 @@ fn scratch_dir(name: &str) -> PathBuf {
 fn run_tape(name: &str) -> PathBuf {
     let tape = fixture_dir().join(format!("{name}.tape"));
     let out = scratch_dir(name);
-    let output = Command::new(env!("CARGO_BIN_EXE_vterm"))
+    let output = Command::new(env!("CARGO_BIN_EXE_vhs-rs"))
         .arg("run")
         .arg("--quiet")
         .arg(&tape)
         .current_dir(&out)
         .output()
-        .expect("failed to spawn vterm");
+        .expect("failed to spawn vhs_rs");
     assert!(
         output.status.success(),
-        "vterm run {name}.tape exited {:?}\nstderr:\n{}",
+        "vhs_rs run {name}.tape exited {:?}\nstderr:\n{}",
         output.status.code(),
         String::from_utf8_lossy(&output.stderr),
     );

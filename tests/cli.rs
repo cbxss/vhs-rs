@@ -1,4 +1,4 @@
-//! CLI-level integration tests: run the compiled `vterm` binary and check
+//! CLI-level integration tests: run the compiled `vhs_rs` binary and check
 //! exit codes, stdout/stderr shape, --json output, and stdin (`-`) tapes.
 
 use std::io::Write as _;
@@ -7,26 +7,26 @@ use std::process::{Command, Output, Stdio};
 const OK_TAPE: &str = "Output demo.gif\nType \"echo hi\"\nEnter\nWait\n";
 const BAD_TAPE: &str = "Foo\nSleep Bar\n";
 
-fn vterm(args: &[&str]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vterm"));
+fn vhs_rs(args: &[&str]) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vhs-rs"));
     cmd.args(args);
     cmd
 }
 
 fn run_with_stdin(args: &[&str], stdin: &str) -> Output {
-    let mut child = vterm(args)
+    let mut child = vhs_rs(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn vterm");
+        .expect("spawn vhs_rs");
     child
         .stdin
         .take()
         .expect("stdin")
         .write_all(stdin.as_bytes())
         .expect("write tape to stdin");
-    child.wait_with_output().expect("wait for vterm")
+    child.wait_with_output().expect("wait for vhs_rs")
 }
 
 /// RAII temp tape file with a unique absolute path.
@@ -35,7 +35,7 @@ struct TempTape(std::path::PathBuf);
 impl TempTape {
     fn new(tag: &str, contents: &str) -> Self {
         let path =
-            std::env::temp_dir().join(format!("vterm_cli_test_{}_{tag}.tape", std::process::id()));
+            std::env::temp_dir().join(format!("vhs_rs_cli_test_{}_{tag}.tape", std::process::id()));
         std::fs::write(&path, contents).expect("write temp tape");
         TempTape(path)
     }
@@ -54,7 +54,7 @@ impl Drop for TempTape {
 #[test]
 fn check_ok_tape_exits_zero() {
     let tape = TempTape::new("check_ok", OK_TAPE);
-    let out = vterm(&["check", tape.path()]).output().expect("run vterm");
+    let out = vhs_rs(&["check", tape.path()]).output().expect("run vhs_rs");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         out.status.code(),
@@ -68,7 +68,7 @@ fn check_ok_tape_exits_zero() {
 #[test]
 fn check_bad_tape_exits_two_with_caret_errors() {
     let tape = TempTape::new("check_bad", BAD_TAPE);
-    let out = vterm(&["check", tape.path()]).output().expect("run vterm");
+    let out = vhs_rs(&["check", tape.path()]).output().expect("run vhs_rs");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2));
     assert!(
@@ -84,9 +84,9 @@ fn check_bad_tape_exits_two_with_caret_errors() {
 #[test]
 fn check_json_reports_errors_with_positions() {
     let tape = TempTape::new("check_json", BAD_TAPE);
-    let out = vterm(&["check", "--json", tape.path()])
+    let out = vhs_rs(&["check", "--json", tape.path()])
         .output()
-        .expect("run vterm");
+        .expect("run vhs_rs");
     assert_eq!(out.status.code(), Some(2));
 
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -109,9 +109,9 @@ fn check_json_reports_errors_with_positions() {
 #[test]
 fn check_json_ok_tape() {
     let tape = TempTape::new("check_json_ok", OK_TAPE);
-    let out = vterm(&["check", "--json", tape.path()])
+    let out = vhs_rs(&["check", "--json", tape.path()])
         .output()
-        .expect("run vterm");
+        .expect("run vhs_rs");
     assert_eq!(out.status.code(), Some(0));
 
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -140,7 +140,7 @@ fn check_reads_tape_from_stdin() {
 
 /// A minimal fast tape writing its golden to an absolute temp path.
 fn runtime_tape(tag: &str) -> (String, std::path::PathBuf) {
-    let out = std::env::temp_dir().join(format!("vterm_cli_{}_{}.txt", tag, std::process::id()));
+    let out = std::env::temp_dir().join(format!("vhs_rs_cli_{}_{}.txt", tag, std::process::id()));
     let tape = format!(
         "Output \"{}\"\nSet TypingSpeed 5ms\nType \"echo hi\"\nEnter\nWait\nAssert+Screen /hi/\n",
         out.display()
@@ -167,7 +167,7 @@ fn run_reads_tape_from_stdin() {
 fn run_clean_tape_executes_end_to_end() {
     let (tape_src, out_path) = runtime_tape("run");
     let tape = TempTape::new("run_clean", &tape_src);
-    let out = vterm(&["run", tape.path()]).output().expect("run vterm");
+    let out = vhs_rs(&["run", tape.path()]).output().expect("run vhs_rs");
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -181,7 +181,7 @@ fn run_clean_tape_executes_end_to_end() {
 #[test]
 fn run_bad_tape_exits_two() {
     let tape = TempTape::new("run_bad", BAD_TAPE);
-    let out = vterm(&["run", tape.path()]).output().expect("run vterm");
+    let out = vhs_rs(&["run", tape.path()]).output().expect("run vhs_rs");
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -194,7 +194,7 @@ fn run_bad_tape_exits_two() {
 fn bare_tape_argument_defaults_to_run() {
     let (tape_src, out_path) = runtime_tape("bare");
     let tape = TempTape::new("default_run", &tape_src);
-    let out = vterm(&[tape.path()]).output().expect("run vterm");
+    let out = vhs_rs(&[tape.path()]).output().expect("run vhs_rs");
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -207,7 +207,7 @@ fn bare_tape_argument_defaults_to_run() {
 
 #[test]
 fn run_failing_assert_exits_one_with_forensics_and_json() {
-    let dir = std::env::temp_dir().join(format!("vterm_forensics_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("vhs_rs_forensics_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let out_txt = dir.join("f.txt");
     let tape_src = format!(
@@ -215,9 +215,9 @@ fn run_failing_assert_exits_one_with_forensics_and_json() {
         out_txt.display()
     );
     let tape = TempTape::new("run_fail", &tape_src);
-    let out = vterm(&["run", "--json", tape.path()])
+    let out = vhs_rs(&["run", "--json", tape.path()])
         .output()
-        .expect("run vterm");
+        .expect("run vhs_rs");
     assert_eq!(out.status.code(), Some(1));
 
     let v: serde_json::Value =
@@ -243,9 +243,9 @@ fn run_wait_timeout_exits_three() {
     let tape_src =
         "Set TypingSpeed 5ms\nType \"echo hi\"\nEnter\nWait+Screen@1s /never matches xyz/\n";
     let tape = TempTape::new("run_timeout", tape_src);
-    let out = vterm(&["run", "--quiet", tape.path()])
+    let out = vhs_rs(&["run", "--quiet", tape.path()])
         .output()
-        .expect("run vterm");
+        .expect("run vhs_rs");
     assert_eq!(out.status.code(), Some(3));
     // Forensics stem falls back to the tape path.
     let stem = tape.path().trim_end_matches(".tape").to_string();
@@ -256,15 +256,15 @@ fn run_wait_timeout_exits_three() {
 
 #[test]
 fn missing_tape_file_exits_four() {
-    let out = vterm(&["check", "/nonexistent/definitely-not-here.tape"])
+    let out = vhs_rs(&["check", "/nonexistent/definitely-not-here.tape"])
         .output()
-        .expect("run vterm");
+        .expect("run vhs_rs");
     assert_eq!(out.status.code(), Some(4));
 }
 
 #[test]
 fn help_documents_exit_codes() {
-    let out = vterm(&["--help"]).output().expect("run vterm");
+    let out = vhs_rs(&["--help"]).output().expect("run vhs_rs");
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout);
     for needle in [
@@ -282,7 +282,7 @@ fn help_documents_exit_codes() {
 
 #[test]
 fn version_prints_cargo_version() {
-    let out = vterm(&["--version"]).output().expect("run vterm");
+    let out = vhs_rs(&["--version"]).output().expect("run vhs_rs");
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(

@@ -320,9 +320,9 @@ mod tests {
 
     #[tokio::test]
     async fn extra_env_reaches_child() {
-        let env = vec![("VTERM_TEST_VAR".to_string(), "marker42".to_string())];
+        let env = vec![("VHS_RS_TEST_VAR".to_string(), "marker42".to_string())];
         let pty = Pty::spawn(
-            &cmd(&["/bin/sh", "-c", "printf %s \"$VTERM_TEST_VAR\""]),
+            &cmd(&["/bin/sh", "-c", "printf %s \"$VHS_RS_TEST_VAR\""]),
             &env,
             (80, 24),
         )

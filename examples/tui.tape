@@ -2,7 +2,7 @@
 # editor, wait for its screen to paint, type, save, and verify the result
 # back at the shell.
 #
-#   vterm run examples/tui.tape
+#   vhs-rs run examples/tui.tape
 #
 # Requires `vi` (any vim/nvi) on PATH.
 
@@ -26,7 +26,7 @@ Wait+Screen@10s /notes\.txt/
 
 # Insert mode, write a line, back to normal mode.
 Type "i"
-Type "Hello from vi inside vterm"
+Type "Hello from vi inside vhs-rs"
 Escape
 Sleep 500ms
 
@@ -40,6 +40,6 @@ Enter
 Wait
 
 # Prove the editor session really wrote the file.
-Assert /Hello from vi inside vterm/
+Assert /Hello from vi inside vhs-rs/
 
 Sleep 1s
