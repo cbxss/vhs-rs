@@ -5,6 +5,22 @@
 //! and `Assert`, and renders PNG screenshots and GIFs natively. No browser,
 //! no ffmpeg.
 
+// Curated lint posture (CI runs clippy with -D warnings, so these are
+// enforced). Deliberately not pedantic-wholesale; `clippy::doc_markdown` is
+// omitted because the docs are full of proper nouns (VHS, xterm.js, theme
+// names) that it false-positives on.
+#![warn(
+    missing_debug_implementations,
+    rust_2018_idioms,
+    unreachable_pub,
+    clippy::use_self,
+    clippy::redundant_clone,
+    clippy::inefficient_to_string,
+    clippy::map_unwrap_or,
+    clippy::items_after_statements,
+    clippy::missing_errors_doc
+)]
+
 pub mod command;
 pub mod error;
 pub mod lexer;

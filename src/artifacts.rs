@@ -42,15 +42,13 @@ impl ArtifactRegistry {
             .collect();
 
         let base = planned_outputs
-            .first()
-            .map(|(_, p)| Path::new(p))
-            .unwrap_or_else(|| Path::new(tape_name));
+            .first().map_or_else(|| Path::new(tape_name), |(_, p)| Path::new(p));
         let forensics_stem = base
             .with_file_name(base.file_stem().unwrap_or(base.as_os_str()))
             .to_string_lossy()
             .into_owned();
 
-        ArtifactRegistry {
+        Self {
             golden_targets,
             forensics_stem,
             records: Vec::new(),
@@ -123,7 +121,7 @@ mod tests {
 
     #[test]
     fn forensics_naming() {
-        let cases: &[ForensicsCase] = &[
+        let cases: &[ForensicsCase<'_>] = &[
             // Stem comes from the first output path, extension stripped.
             (
                 &[(".png", "report.png")],

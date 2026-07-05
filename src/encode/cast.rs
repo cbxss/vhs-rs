@@ -77,7 +77,7 @@ struct MicroQuantizer {
 
 impl MicroQuantizer {
     fn new() -> Self {
-        MicroQuantizer { error_nanos: 0 }
+        Self { error_nanos: 0 }
     }
 
     fn next_micros(&mut self, dt: Duration) -> u128 {

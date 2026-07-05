@@ -78,7 +78,7 @@ impl GifOptions {
     /// Options for a `width`×`height` GIF with default timing (50 fps cap,
     /// 1.0 speed, 1s last-frame hold).
     pub fn new(width: u16, height: u16) -> Self {
-        GifOptions {
+        Self {
             width,
             height,
             max_fps: 50.0,
@@ -317,7 +317,7 @@ impl GifEncoder {
 
         let writer = BufWriter::new(File::create(path)?);
 
-        Ok(GifEncoder {
+        Ok(Self {
             sink: Sink::Buffered {
                 writer,
                 palette: Palette::default(),
@@ -594,7 +594,7 @@ impl GifEncoder {
         };
 
         let region = dirty_region(prev_rgba.as_deref(), rgba, width, height, 4);
-        let (region_buf, left, top, w, h): (Cow<[u8]>, _, _, _, _) = match region {
+        let (region_buf, left, top, w, h): (Cow<'_, [u8]>, _, _, _, _) = match region {
             None => (Cow::Borrowed(rgba), 0, 0, width, height),
             Some(r) => (Cow::Owned(crop(rgba, width, 4, r)), r.0, r.1, r.2, r.3),
         };

@@ -22,7 +22,7 @@ pub struct Command {
 
 impl Command {
     pub fn new(command_type: TokenType, token: Token) -> Self {
-        Command {
+        Self {
             command_type,
             options: String::new(),
             args: String::new(),

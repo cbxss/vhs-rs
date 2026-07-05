@@ -56,7 +56,7 @@ impl Pty {
         command: &[String],
         env: &[(String, String)],
         winsize: (u16, u16),
-    ) -> io::Result<Pty> {
+    ) -> io::Result<Self> {
         if command.is_empty() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty command"));
         }
@@ -74,7 +74,7 @@ impl Pty {
                 set_nonblocking(&master)?;
                 let master = AsyncFd::new(master)?;
 
-                Ok(Pty {
+                Ok(Self {
                     child,
                     master,
                     status: None,

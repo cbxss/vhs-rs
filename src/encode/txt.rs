@@ -38,7 +38,7 @@ pub struct GoldenWriter {
 impl GoldenWriter {
     /// Creates an empty golden accumulator.
     pub fn new() -> Self {
-        GoldenWriter::default()
+        Self::default()
     }
 
     /// Records the screen buffer after a command: appends the full text, a

@@ -246,17 +246,21 @@ impl<'a> Parser<'a> {
 
             in_modifier_chain = false;
 
-            use TokenType::*;
-            match peek.token_type {
-                Enter | Space | Backspace | Minus | At | LeftBracket | RightBracket | Caret
-                | Backslash | Left | Right | Up | Down => args.push(peek.literal),
-                String if peek.literal.len() == 1 => args.push(peek.literal),
-                _ => {
-                    self.error(self.cur.clone(), "Not a valid modifier");
-                    self.error(
-                        self.cur.clone(),
-                        format!("Invalid control argument: {}", self.cur.literal),
-                    );
+            // Inner scope: the glob import must not shadow `String` for the
+            // rest of the function (and items may not follow statements).
+            {
+                use TokenType::*;
+                match peek.token_type {
+                    Enter | Space | Backspace | Minus | At | LeftBracket | RightBracket | Caret
+                    | Backslash | Left | Right | Up | Down => args.push(peek.literal),
+                    String if peek.literal.len() == 1 => args.push(peek.literal),
+                    _ => {
+                        self.error(self.cur.clone(), "Not a valid modifier");
+                        self.error(
+                            self.cur.clone(),
+                            format!("Invalid control argument: {}", self.cur.literal),
+                        );
+                    }
                 }
             }
 

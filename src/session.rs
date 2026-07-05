@@ -88,10 +88,10 @@ impl Session {
         env: &[(String, String)],
         cols: usize,
         rows: usize,
-    ) -> io::Result<Session> {
+    ) -> io::Result<Self> {
         let pty = Pty::spawn(command, env, (cols as u16, rows as u16))?;
 
-        Ok(Session {
+        Ok(Self {
             pty,
             term: Term::new(cols, rows),
             events: Vec::new(),

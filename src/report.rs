@@ -100,7 +100,7 @@ pub struct ReportBuilder {
 
 impl ReportBuilder {
     pub fn new(tape: impl Into<String>) -> Self {
-        ReportBuilder {
+        Self {
             tape: tape.into(),
             started: Instant::now(),
             term: None,

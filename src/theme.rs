@@ -14,27 +14,27 @@ pub struct Rgb(pub u8, pub u8, pub u8);
 
 impl Rgb {
     /// Parses `#rrggbb`, `rrggbb`, `#rgb`, or `rgb` (VHS's parseHexColor set).
-    pub fn from_hex(s: &str) -> Option<Rgb> {
+    pub fn from_hex(s: &str) -> Option<Self> {
         let hex = s.strip_prefix('#').unwrap_or(s);
         match hex.len() {
             6 => {
                 let v = u32::from_str_radix(hex, 16).ok()?;
-                Some(Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
+                Some(Self((v >> 16) as u8, (v >> 8) as u8, v as u8))
             }
             3 => {
                 let v = u32::from_str_radix(hex, 16).ok()?;
                 // Double each hex digit: 0xf -> 0xff.
                 let d = |n: u32| ((n & 0xf) * 17) as u8;
-                Some(Rgb(d(v >> 8), d(v >> 4), d(v)))
+                Some(Self(d(v >> 8), d(v >> 4), d(v)))
             }
             _ => None,
         }
     }
 
     /// Linear per-channel blend from `self` toward `other` by `t` in [0, 1].
-    pub fn lerp(self, other: Rgb, t: f32) -> Rgb {
+    pub fn lerp(self, other: Self, t: f32) -> Self {
         let ch = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
-        Rgb(
+        Self(
             ch(self.0, other.0),
             ch(self.1, other.1),
             ch(self.2, other.2),

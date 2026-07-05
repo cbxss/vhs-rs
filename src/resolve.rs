@@ -31,15 +31,15 @@ pub enum Scope {
 impl Scope {
     pub fn name(&self) -> &'static str {
         match self {
-            Scope::Line => "Line",
-            Scope::Screen => "Screen",
+            Self::Line => "Line",
+            Self::Screen => "Screen",
         }
     }
 
     pub fn text(&self, term: &Term) -> String {
         match self {
-            Scope::Line => term.current_line(),
-            Scope::Screen => term.text(),
+            Self::Line => term.current_line(),
+            Self::Screen => term.text(),
         }
     }
 }

@@ -29,8 +29,8 @@ pub struct Term {
 impl Term {
     /// Creates a `cols × rows` terminal with no scrollback (vhs_rs only ever
     /// inspects the visible screen; dropping scrollback keeps memory flat).
-    pub fn new(cols: usize, rows: usize) -> Term {
-        Term {
+    pub fn new(cols: usize, rows: usize) -> Self {
+        Self {
             vt: Vt::builder().size(cols, rows).scrollback_limit(0).build(),
         }
     }

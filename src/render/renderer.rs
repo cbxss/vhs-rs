@@ -15,8 +15,8 @@ pub struct Canvas {
 }
 
 impl Canvas {
-    pub fn new(w: usize, h: usize) -> Canvas {
-        Canvas {
+    pub fn new(w: usize, h: usize) -> Self {
+        Self {
             w,
             h,
             buf: vec![0; w * h * 4],
@@ -100,10 +100,10 @@ impl std::str::FromStr for BarStyle {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "Colorful" => Ok(BarStyle::Colorful),
-            "ColorfulRight" => Ok(BarStyle::ColorfulRight),
-            "Rings" => Ok(BarStyle::Rings),
-            "RingsRight" => Ok(BarStyle::RingsRight),
+            "Colorful" => Ok(Self::Colorful),
+            "ColorfulRight" => Ok(Self::ColorfulRight),
+            "Rings" => Ok(Self::Rings),
+            "RingsRight" => Ok(Self::RingsRight),
             _ => Err(format!("unknown window bar style {s:?}")),
         }
     }
@@ -135,7 +135,7 @@ pub struct RenderOptions {
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        RenderOptions {
+        Self {
             width: 1200,                    // VHS defaultWidth
             height: 600,                    // VHS defaultHeight
             padding: 60,                    // VHS defaultPadding
@@ -179,11 +179,11 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(opts: RenderOptions, theme: Theme) -> Renderer {
+    pub fn new(opts: RenderOptions, theme: Theme) -> Self {
         let fonts = FontSet::new(opts.font_size);
         let metrics = fonts.metrics(opts.line_height, opts.letter_spacing);
         let canvas = Canvas::new(opts.width, opts.height);
-        Renderer {
+        Self {
             opts,
             theme,
             fonts,
@@ -650,7 +650,7 @@ mod tests {
         let mut r = Renderer::new(opts, theme.clone());
         // Bar eats grid rows.
         let (_, rows_with_bar) = r.term_size();
-        let (_, rows_plain) = Renderer::new(small_options(), theme.clone()).term_size();
+        let (_, rows_plain) = Renderer::new(small_options(), theme).term_size();
         assert!(rows_with_bar < rows_plain);
 
         let canvas = r.render(&sample_snapshot()).clone();

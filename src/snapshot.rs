@@ -40,7 +40,7 @@ pub struct Cell {
 
 impl Default for Cell {
     fn default() -> Self {
-        Cell {
+        Self {
             ch: ' ',
             fg: None,
             bg: None,

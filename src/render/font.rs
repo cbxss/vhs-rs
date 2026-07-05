@@ -73,8 +73,8 @@ fn load(bytes: &[u8]) -> Font {
 
 impl FontSet {
     /// Loads the embedded fonts for rasterization at `px` pixels.
-    pub fn new(px: f32) -> FontSet {
-        FontSet {
+    pub fn new(px: f32) -> Self {
+        Self {
             regular: load(REGULAR),
             bold: OnceCell::new(),
             italic: OnceCell::new(),

@@ -22,11 +22,11 @@ impl ExitKind {
     /// the failure `reason` — the single source of truth for the taxonomy.
     pub fn reason(&self) -> &'static str {
         match self {
-            ExitKind::Success => "success",
-            ExitKind::AssertFailed => "assert_failed",
-            ExitKind::Parse => "parse_error",
-            ExitKind::WaitTimeout => "wait_timeout",
-            ExitKind::Runtime => "runtime_error",
+            Self::Success => "success",
+            Self::AssertFailed => "assert_failed",
+            Self::Parse => "parse_error",
+            Self::WaitTimeout => "wait_timeout",
+            Self::Runtime => "runtime_error",
         }
     }
 }
@@ -40,7 +40,7 @@ pub struct ParseError {
 
 impl ParseError {
     pub fn new(token: Token, msg: impl Into<String>) -> Self {
-        ParseError {
+        Self {
             token,
             msg: msg.into(),
         }

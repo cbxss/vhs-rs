@@ -47,7 +47,7 @@ struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings {
+        Self {
             shell: "bash".into(),
             typing_speed: Duration::from_millis(50),
             wait_timeout: Duration::from_secs(15),
