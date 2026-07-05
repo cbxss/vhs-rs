@@ -1,1 +1,14 @@
 /target
+
+# Outputs from running the example tapes at the repo root.
+# The committed demo assets live in examples/ (readme.gif, failure-forensics.png).
+/demo.gif
+/tui.gif
+/proof.png
+/proof.txt
+/evidence.txt
+/agent-check.txt
+/agent-check-screen.txt
+/failure-demo.txt
+*.failure.txt
+*.failure.png
