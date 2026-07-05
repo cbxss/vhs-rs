@@ -33,9 +33,11 @@ pub mod encode {
     pub mod txt;
 }
 
+pub mod artifacts;
 pub mod cli;
 pub mod evaluator;
 pub mod report;
+pub mod resolve;
 
 use error::ParseError;
 

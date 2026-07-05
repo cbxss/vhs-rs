@@ -139,17 +139,11 @@ impl ReportBuilder {
         });
     }
 
-    pub fn add_artifact(
-        &mut self,
-        path: impl Into<String>,
-        kind: ArtifactKind,
-        command_index: Option<usize>,
-    ) {
-        self.artifacts.push(Artifact {
-            path: path.into(),
-            kind,
-            command_index,
-        });
+    /// Appends artifacts in write order. The artifact list is owned by the
+    /// [`ArtifactRegistry`](crate::artifacts::ArtifactRegistry) during the
+    /// run; it drains here once at the end.
+    pub fn extend_artifacts(&mut self, artifacts: impl IntoIterator<Item = Artifact>) {
+        self.artifacts.extend(artifacts);
     }
 
     pub fn set_failure(

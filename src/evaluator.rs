@@ -6,12 +6,14 @@
 //! Waits and asserts are event-driven — check the rendered buffer, then await
 //! the next PTY chunk with a deadline; no polling.
 
+use crate::artifacts::ArtifactRegistry;
 use crate::command::Command;
 use crate::encode::{cast, gif, png, txt};
 use crate::error::ExitKind;
 use crate::keys;
 use crate::render::{BarStyle, MarginFill, RenderOptions, Renderer};
 use crate::report::{ArtifactKind, CommandStatus, ReportBuilder};
+use crate::resolve::{Resolved, Scope, resolve_commands};
 use crate::session::Session;
 use crate::snapshot::{SessionEvent, SessionEventKind};
 use crate::term::Term;
@@ -19,7 +21,6 @@ use crate::theme::{self, Rgb, Theme};
 use crate::token::TokenType;
 use crate::util::parse_duration;
 use regex::Regex;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -106,19 +107,34 @@ async fn run_inner(
     report: &mut ReportBuilder,
     quiet: bool,
 ) -> ExitKind {
+    // ---- Typed resolution side table: everything the parser already
+    // validated (durations, counts, Wait/Assert scopes and regexes) lifted
+    // out of the command strings once, aligned by index.
+    let resolved = match resolve_commands(commands) {
+        Ok(r) => r,
+        Err(msg) => {
+            report.set_failure(None, ExitKind::Runtime.reason(), msg);
+            return ExitKind::Runtime;
+        }
+    };
+
     // ---- Settings pre-pass: everything before the first action command.
     let mut settings = Settings::default();
     let mut spawn_env: Vec<(String, String)> = Vec::new();
     let mut outputs: Vec<(String, String)> = Vec::new(); // (ext, path)
     let mut started = false;
 
-    for cmd in commands {
+    for (cmd, res) in commands.iter().zip(resolved.iter()) {
         match cmd.command_type {
             TokenType::Set if !started => apply_setting(&mut settings, cmd, quiet),
             TokenType::Env if !started => {
                 spawn_env.push((cmd.options.clone(), cmd.args.clone()));
             }
-            TokenType::Output => outputs.push((cmd.options.clone(), cmd.args.clone())),
+            TokenType::Output => {
+                if let Resolved::OutputTarget { ext, path } = res {
+                    outputs.push((ext.clone(), path.clone()));
+                }
+            }
             TokenType::Require => {
                 if which(&cmd.args).is_none() {
                     report.set_failure(
@@ -178,23 +194,11 @@ async fn run_inner(
 
     // Golden writer for `Output .txt/.ascii/.test` (records after every command).
     let mut golden = txt::GoldenWriter::new();
-    let golden_paths: HashSet<String> = outputs
-        .iter()
-        .filter(|(ext, _)| matches!(ext.as_str(), ".txt" | ".ascii" | ".test"))
-        .map(|(_, path)| path.clone())
-        .collect();
 
-    // Forensics stem: first output path (sans extension), else the tape name;
-    // either way the `.failure.*` files land next to it.
-    let forensics_stem = {
-        let base = outputs
-            .first()
-            .map(|(_, p)| Path::new(p))
-            .unwrap_or_else(|| Path::new(tape_name));
-        base.with_file_name(base.file_stem().unwrap_or(base.as_os_str()))
-            .to_string_lossy()
-            .into_owned()
-    };
+    // One owner for artifact bookkeeping: planned golden targets, written
+    // artifacts (drained into the report at the end), collision warnings,
+    // and forensics naming.
+    let mut registry = ArtifactRegistry::new(&outputs, tape_name, quiet);
 
     // Implicit initial wait for the prompt — removes the classic race where
     // typing starts before the shell is up. Non-fatal: warn and continue.
@@ -220,17 +224,17 @@ async fn run_inner(
     let mut theme_timeline: Vec<(Duration, Theme)> = Vec::new();
     let mut exit = ExitKind::Success;
 
-    for (index, cmd) in commands.iter().enumerate() {
+    for (index, (cmd, res)) in commands.iter().zip(resolved.iter()).enumerate() {
         let step_start = Instant::now();
         let result = execute(
             cmd,
+            res,
             &mut session,
             &mut settings,
             &mut renderer,
             &mut clipboard,
             &mut theme_timeline,
-            &golden_paths,
-            report,
+            &mut registry,
             index,
             quiet,
         )
@@ -259,7 +263,7 @@ async fn run_inner(
             }
         }
 
-        if !golden_paths.is_empty() {
+        if registry.has_golden_targets() {
             golden.record(&session.term().text());
         }
     }
@@ -267,14 +271,13 @@ async fn run_inner(
     // ---- Failure forensics: dump exactly what the terminal showed.
     if exit != ExitKind::Success {
         let _ = session.drain();
-        let text_path = format!("{forensics_stem}.failure.txt");
-        if txt::write_capture(Path::new(&text_path), &session.term().text()).is_ok() {
-            report.add_artifact(&text_path, ArtifactKind::FailureText, None);
+        let (text_path, png_path) = registry.forensics_paths();
+        if txt::write_capture(&text_path, &session.term().text()).is_ok() {
+            registry.record(text_path.to_string_lossy(), ArtifactKind::FailureText, None);
         }
-        let png_path = format!("{forensics_stem}.failure.png");
         let canvas = renderer.render(&session.term().snapshot());
-        if png::write_png(Path::new(&png_path), canvas).is_ok() {
-            report.add_artifact(&png_path, ArtifactKind::FailurePng, None);
+        if png::write_png(&png_path, canvas).is_ok() {
+            registry.record(png_path.to_string_lossy(), ArtifactKind::FailurePng, None);
         }
     }
 
@@ -326,7 +329,7 @@ async fn run_inner(
         };
 
         match result {
-            Ok(kind) => report.add_artifact(path.clone(), kind, None),
+            Ok(kind) => registry.record(path.clone(), kind, None),
             Err(e) => {
                 report.set_failure(
                     None,
@@ -340,20 +343,24 @@ async fn run_inner(
         }
     }
 
+    registry.drain_into(report);
     exit
 }
 
-/// Executes one command. `Ok(detail)` on success, `Err(StepFailure)` aborts.
+/// Executes one command from its typed resolution (`res` carries everything
+/// that was parsed out of the command strings; `cmd` remains for line
+/// numbers and verbatim data). `Ok(detail)` on success, `Err(StepFailure)`
+/// aborts.
 #[allow(clippy::too_many_arguments)]
 async fn execute(
     cmd: &Command,
+    res: &Resolved,
     session: &mut Session,
     settings: &mut Settings,
     renderer: &mut Renderer,
     clipboard: &mut String,
     theme_timeline: &mut Vec<(Duration, Theme)>,
-    golden_paths: &HashSet<String>,
-    report: &mut ReportBuilder,
+    registry: &mut ArtifactRegistry,
     index: usize,
     quiet: bool,
 ) -> Result<Option<serde_json::Value>, StepFailure> {
@@ -373,9 +380,12 @@ async fn execute(
         }
 
         Type => {
-            let speed = speed_of(cmd, settings.typing_speed);
+            let Resolved::TypeText { speed, text } = res else {
+                return Err(resolved_mismatch(cmd));
+            };
+            let speed = speed.unwrap_or(settings.typing_speed);
             let mut buf = [0u8; 4];
-            for ch in cmd.args.chars() {
+            for ch in text.chars() {
                 session
                     .write(ch.encode_utf8(&mut buf).as_bytes())
                     .await
@@ -387,12 +397,14 @@ async fn execute(
 
         Enter | Space | Backspace | Delete | Insert | Escape | Tab | Down | Left | Right | Up
         | PageUp | PageDown | Home | End => {
-            let speed = speed_of(cmd, settings.typing_speed);
-            let count: usize = cmd.args.parse().unwrap_or(1);
+            let Resolved::Keypress { speed, count } = res else {
+                return Err(resolved_mismatch(cmd));
+            };
+            let speed = speed.unwrap_or(settings.typing_speed);
             let bytes = keys::keypress_bytes(cmd.command_type, session.application_cursor())
                 .ok_or_else(|| runtime_fail(format!("no key mapping for {}", cmd.command_type)))?
                 .to_vec();
-            for _ in 0..count {
+            for _ in 0..*count {
                 session.write(&bytes).await.map_err(io_fail)?;
                 settle(session, speed).await;
             }
@@ -400,13 +412,15 @@ async fn execute(
         }
 
         ScrollUp | ScrollDown => {
-            let speed = speed_of(cmd, settings.typing_speed);
-            let count: usize = cmd.args.parse().unwrap_or(1);
+            let Resolved::Keypress { speed, count } = res else {
+                return Err(resolved_mismatch(cmd));
+            };
+            let speed = speed.unwrap_or(settings.typing_speed);
             let _ = session.drain();
             if mouse_reporting_enabled(session.events()) {
                 let cursor = session.term().cursor();
                 let bytes = keys::wheel_bytes(cmd.command_type == ScrollUp, cursor.col, cursor.row);
-                for _ in 0..count {
+                for _ in 0..*count {
                     session.write(&bytes).await.map_err(io_fail)?;
                     settle(session, speed).await;
                 }
@@ -431,21 +445,31 @@ async fn execute(
         }
 
         Sleep => {
-            let d = parse_duration(&cmd.args)
-                .ok_or_else(|| runtime_fail(format!("bad duration {}", cmd.args)))?;
-            settle(session, d).await;
+            let Resolved::Sleep { duration } = res else {
+                return Err(resolved_mismatch(cmd));
+            };
+            settle(session, *duration).await;
             Ok(None)
         }
 
         Wait => {
-            let (scope, regex) = wait_args(cmd, settings)?;
-            let timeout = timeout_of(cmd, settings.wait_timeout)?;
+            let Resolved::WaitLike {
+                scope,
+                regex,
+                timeout,
+            } = res
+            else {
+                return Err(resolved_mismatch(cmd));
+            };
+            let scope = *scope;
+            let regex = regex.as_ref().unwrap_or(&settings.wait_pattern);
+            let timeout = timeout.unwrap_or(settings.wait_timeout);
             let started = Instant::now();
-            if wait_for(session, scope, &regex, timeout)
+            if wait_for(session, scope, regex, timeout)
                 .await
                 .map_err(io_fail)?
             {
-                Ok(Some(match_detail(scope, &regex, Some(started.elapsed()))))
+                Ok(Some(match_detail(scope, regex, Some(started.elapsed()))))
             } else {
                 let seen = scope.text(session.term());
                 let message = format!(
@@ -457,7 +481,7 @@ async fn execute(
                 Err(match_failure(
                     ExitKind::WaitTimeout,
                     scope,
-                    &regex,
+                    regex,
                     seen,
                     message,
                 ))
@@ -465,25 +489,35 @@ async fn execute(
         }
 
         Assert => {
-            let (scope, regex) = wait_args(cmd, settings)?;
-            let matched = if cmd.options.is_empty() {
-                let _ = session.drain();
-                regex.is_match(&scope.text(session.term()))
-            } else {
-                let timeout = timeout_of(cmd, settings.wait_timeout)?;
-                wait_for(session, scope, &regex, timeout)
+            let Resolved::WaitLike {
+                scope,
+                regex,
+                timeout,
+            } = res
+            else {
+                return Err(resolved_mismatch(cmd));
+            };
+            let scope = *scope;
+            let regex = regex.as_ref().unwrap_or(&settings.wait_pattern);
+            let matched = match timeout {
+                // No timeout: a single immediate check.
+                None => {
+                    let _ = session.drain();
+                    regex.is_match(&scope.text(session.term()))
+                }
+                Some(timeout) => wait_for(session, scope, regex, *timeout)
                     .await
-                    .map_err(io_fail)?
+                    .map_err(io_fail)?,
             };
             if matched {
-                Ok(Some(match_detail(scope, &regex, None)))
+                Ok(Some(match_detail(scope, regex, None)))
             } else {
                 let seen = scope.text(session.term());
                 let message = format!("Assert /{}/ did not match {}", regex.as_str(), scope.name());
                 Err(match_failure(
                     ExitKind::AssertFailed,
                     scope,
-                    &regex,
+                    regex,
                     seen,
                     message,
                 ))
@@ -491,18 +525,21 @@ async fn execute(
         }
 
         Screenshot => {
+            let Resolved::PathCommand { path } = res else {
+                return Err(resolved_mismatch(cmd));
+            };
             let _ = session.drain();
             let snap = session.term().snapshot();
             let canvas = renderer.render(&snap);
-            png::write_png(Path::new(&cmd.args), canvas)
-                .map_err(|e| runtime_fail(format!("screenshot {}: {e}", cmd.args)))?;
-            report.add_artifact(&cmd.args, ArtifactKind::Png, Some(index));
+            png::write_png(Path::new(path), canvas)
+                .map_err(|e| runtime_fail(format!("screenshot {path}: {e}")))?;
+            registry.record(path.clone(), ArtifactKind::Png, Some(index));
             // Text sibling: the same screen as the agent's cheap input. Skip
             // it if that path is a registered `Output` golden target — the
             // end-of-run golden write must not be clobbered.
-            let txt_path = PathBuf::from(&cmd.args).with_extension("txt");
+            let txt_path = PathBuf::from(path).with_extension("txt");
             let txt_str = txt_path.to_string_lossy();
-            if golden_paths.contains(txt_str.as_ref()) {
+            if registry.is_golden_target(&txt_str) {
                 if !quiet {
                     eprintln!(
                         "vhs-rs: warning: screenshot text sibling {txt_str} collides with an Output golden target; skipped"
@@ -511,17 +548,20 @@ async fn execute(
             } else {
                 txt::write_capture(&txt_path, &session.term().text())
                     .map_err(|e| runtime_fail(format!("screenshot text sibling: {e}")))?;
-                report.add_artifact(txt_str, ArtifactKind::Text, Some(index));
+                registry.record(txt_str, ArtifactKind::Text, Some(index));
             }
-            Ok(Some(serde_json::json!({"path": cmd.args})))
+            Ok(Some(serde_json::json!({"path": path})))
         }
 
         Capture => {
+            let Resolved::PathCommand { path } = res else {
+                return Err(resolved_mismatch(cmd));
+            };
             let _ = session.drain();
-            txt::write_capture(Path::new(&cmd.args), &session.term().text())
-                .map_err(|e| runtime_fail(format!("capture {}: {e}", cmd.args)))?;
-            report.add_artifact(&cmd.args, ArtifactKind::Text, Some(index));
-            Ok(Some(serde_json::json!({"path": cmd.args})))
+            txt::write_capture(Path::new(path), &session.term().text())
+                .map_err(|e| runtime_fail(format!("capture {path}: {e}")))?;
+            registry.record(path.clone(), ArtifactKind::Text, Some(index));
+            Ok(Some(serde_json::json!({"path": path})))
         }
 
         Hide => {
@@ -534,7 +574,10 @@ async fn execute(
         }
 
         Copy => {
-            *clipboard = cmd.args.clone();
+            let Resolved::CopyText { text } = res else {
+                return Err(resolved_mismatch(cmd));
+            };
+            *clipboard = text.clone();
             Ok(None)
         }
         Paste => {
@@ -561,27 +604,6 @@ async fn execute(
 }
 
 // ---- Wait/Assert machinery --------------------------------------------------
-
-#[derive(Clone, Copy, PartialEq)]
-enum Scope {
-    Line,
-    Screen,
-}
-
-impl Scope {
-    fn name(&self) -> &'static str {
-        match self {
-            Scope::Line => "Line",
-            Scope::Screen => "Screen",
-        }
-    }
-    fn text(&self, term: &Term) -> String {
-        match self {
-            Scope::Line => term.current_line(),
-            Scope::Screen => term.text(),
-        }
-    }
-}
 
 /// Report detail for a successful Wait/Assert match (`elapsed` only for Wait).
 fn match_detail(scope: Scope, regex: &Regex, elapsed: Option<Duration>) -> serde_json::Value {
@@ -611,24 +633,6 @@ fn match_failure(
             "matched": false, "screen_text": seen,
         })),
     }
-}
-
-fn wait_args(cmd: &Command, settings: &Settings) -> Result<(Scope, Regex), StepFailure> {
-    let (scope_str, pattern) = match cmd.args.split_once(' ') {
-        Some((s, re)) => (s, Some(re)),
-        None => (cmd.args.as_str(), None),
-    };
-    let scope = match scope_str {
-        "Screen" => Scope::Screen,
-        _ => Scope::Line,
-    };
-    let regex = match pattern {
-        Some(re) => {
-            Regex::new(re).map_err(|e| runtime_fail(format!("invalid regex /{re}/: {e}")))?
-        }
-        None => settings.wait_pattern.clone(),
-    };
-    Ok((scope, regex))
 }
 
 /// Event-driven wait: check, then await the next output chunk, re-check.
@@ -950,23 +954,6 @@ fn set_f32(target: &mut f32, v: &str) {
     }
 }
 
-fn speed_of(cmd: &Command, default: Duration) -> Duration {
-    if cmd.options.is_empty() {
-        default
-    } else {
-        parse_duration(&cmd.options).unwrap_or(default)
-    }
-}
-
-fn timeout_of(cmd: &Command, default: Duration) -> Result<Duration, StepFailure> {
-    if cmd.options.is_empty() {
-        Ok(default)
-    } else {
-        parse_duration(&cmd.options)
-            .ok_or_else(|| runtime_fail(format!("bad timeout {}", cmd.options)))
-    }
-}
-
 fn shell_argv(shell: &str) -> Vec<String> {
     match shell {
         "bash" => vec![
@@ -999,6 +986,15 @@ fn runtime_fail(message: String) -> StepFailure {
         message,
         detail: None,
     }
+}
+
+/// The resolution side table disagreed with the command list — impossible
+/// unless `resolve_commands` and `execute` drift apart.
+fn resolved_mismatch(cmd: &Command) -> StepFailure {
+    runtime_fail(format!(
+        "internal error: resolution mismatch for {} (line {})",
+        cmd.command_type, cmd.token.line
+    ))
 }
 
 #[cfg(test)]
