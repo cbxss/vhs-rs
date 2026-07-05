@@ -45,7 +45,8 @@ impl ArtifactRegistry {
             .collect();
 
         let base = planned_outputs
-            .first().map_or_else(|| Path::new(tape_name), |(_, p)| Path::new(p));
+            .first()
+            .map_or_else(|| Path::new(tape_name), |(_, p)| Path::new(p));
         let forensics_stem = base
             .with_file_name(base.file_stem().unwrap_or(base.as_os_str()))
             .to_string_lossy()

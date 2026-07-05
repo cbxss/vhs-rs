@@ -1134,11 +1134,13 @@ fn which(bin: &str, env_path: Option<&str>) -> Option<PathBuf> {
     let path = env_path
         .map(std::ffi::OsString::from)
         .or_else(|| std::env::var_os("PATH"))?;
-    std::env::split_paths(&path).map(|dir| dir.join(bin)).find(|p| {
-        p.is_file()
-            && p.metadata()
-                .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
-    })
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(bin))
+        .find(|p| {
+            p.is_file()
+                && p.metadata()
+                    .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+        })
 }
 
 fn io_fail(e: std::io::Error) -> StepFailure {

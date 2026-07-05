@@ -203,7 +203,10 @@ fn load_and_parse(
             match shape {
                 JsonShape::RunReport => {
                     let message = format!("{} parse error(s)", errors.len());
-                    println!("{}", run_error_json(path, ExitKind::Parse, &message, &errors));
+                    println!(
+                        "{}",
+                        run_error_json(path, ExitKind::Parse, &message, &errors)
+                    );
                 }
                 JsonShape::ParseResult => {
                     println!("{}", parse_result_json(commands.len(), &errors));
@@ -219,15 +222,11 @@ fn load_and_parse(
 }
 
 fn run(args: RunArgs) -> i32 {
-    let (path, commands) = match load_and_parse(
-        "run",
-        args.tape.as_deref(),
-        args.json,
-        JsonShape::RunReport,
-    ) {
-        Ok(parsed) => parsed,
-        Err(code) => return code,
-    };
+    let (path, commands) =
+        match load_and_parse("run", args.tape.as_deref(), args.json, JsonShape::RunReport) {
+            Ok(parsed) => parsed,
+            Err(code) => return code,
+        };
 
     crate::evaluator::run(&path, &commands, args.json, args.quiet, args.timeout)
 }
