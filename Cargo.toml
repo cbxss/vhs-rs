@@ -1,0 +1,27 @@
+[package]
+name = "vterm"
+version = "0.1.0"
+edition = "2024"
+description = "Agent-first terminal automation: VHS-compatible tapes, screenshots, GIFs — no browser"
+license = "MIT"
+
+[dependencies]
+avt = "0.18"
+clap = { version = "4", features = ["derive"] }
+fontdue = "0.9"
+gif = "0.13"
+nix = { version = "0.30", features = ["term", "process", "signal", "fs"] }
+png = "0.18"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net", "io-util", "signal"] }
+
+[lib]
+name = "vterm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vterm"
+path = "src/main.rs"
