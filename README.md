@@ -1,250 +1,261 @@
 # vhs-rs
 
-**Agent-first terminal automation: VHS-compatible tapes, assertions, screenshots, and GIFs — no browser, no ffmpeg.**
+<p>
+  <img alt="A terminal window rendered by vhs-rs" src="examples/readme.gif" width="600" />
+  <br>
+  <a href="https://github.com/cbxss/vhs-rs/actions"><img src="https://github.com/cbxss/vhs-rs/workflows/CI/badge.svg" alt="Build Status"></a>
+</p>
 
-![demo](demo.gif)
+Script your terminal, test what it shows, and get a GIF to prove it. One binary,
+no browser, no ffmpeg.
 
-vhs-rs executes [VHS](https://github.com/charmbracelet/vhs)-style `.tape` scripts against a **real PTY**, models the screen with an offscreen terminal emulator ([avt](https://crates.io/crates/avt)), and rasterizes PNG/GIF output itself. It is a single static binary with zero runtime dependencies — no Chromium, no ttyd, no ffmpeg.
+The GIF above was made by vhs-rs ([view source](examples/readme.tape)).
 
-The primary consumer is an **AI coding agent** that writes a tape, runs it, and uses the results as evidence: meaningful exit codes, a machine-readable JSON report, plain-text screen captures, automatic failure forensics, and deterministic output you can diff. Humans watching GIFs are the secondary audience.
+vhs-rs runs [VHS](https://github.com/charmbracelet/vhs)-style `.tape` files in a
+real terminal: it types your commands into a PTY, waits for output to appear,
+asserts on it, and renders what happened as a GIF, PNG, or plain text. It was
+built with AI agents in mind — exit codes mean something, every run can emit a
+JSON report, and failures leave a screenshot behind — but it's a perfectly good
+way for a human to make demo GIFs too.
 
-### vhs-rs vs VHS
+## Tutorial
 
-|                      | VHS                                            | vhs-rs                                                        |
-| -------------------- | ---------------------------------------------- | ------------------------------------------------------------ |
-| Runtime dependencies | Chromium + ttyd (+ ffmpeg for video)           | none — single static binary                                  |
-| `Wait` mechanism     | polls xterm.js via JS eval every 10 ms         | event-driven: regex re-checked on each PTY output chunk      |
-| Assertions           | none                                           | `Assert[+Screen\|+Line][@timeout] /re/` → exit 1 on mismatch |
-| Machine output       | prose on stderr                                | `--json` run report on stdout                                |
-| Exit codes           | coarse; render errors can be swallowed         | 0/1/2/3/4 taxonomy; every error propagates                   |
-| `.mp4` / `.webm`     | yes (via ffmpeg)                               | no (dropped — see [support matrix](#command-support-matrix)) |
-| Screenshots          | PNG                                            | PNG + automatic plain-text `.txt` sibling                    |
+Create a tape file:
 
-## Quickstart
-
-Build (requires a Rust toolchain; runtime needs only a Unix system with `bash`):
-
-```sh
-cargo build --release
-# → target/release/vhs-rs
-```
-
-Write a tape:
-
-```
-# hello.tape
+```elixir
+# demo.tape
 Output demo.gif
 
-Type "echo hello from vhs-rs"
+Set Theme "Catppuccin Mocha"
+Set WindowBar Colorful
+
+# Type a command.
+Type "echo 'Welcome to vhs-rs!'"
+
+# Run it.
 Enter
+
+# Wait for the prompt to come back. No sleeps, no guessing —
+# this blocks until the shell is actually done.
 Wait
 
-Assert /hello from vhs-rs/
+# Prove the output is what you think it is.
+Assert /Welcome to vhs-rs/
+
+# Take a picture, then linger a moment for the GIF.
 Screenshot proof.png
+Sleep 2s
 ```
 
 Run it:
 
 ```sh
-vhs-rs run hello.tape          # execute (also: `vhs-rs hello.tape`)
-vhs-rs run --json hello.tape   # same, with a JSON report on stdout
-vhs-rs check hello.tape        # parse + validate only, no execution
-echo 'Type "date"' | vhs-rs run -   # read the tape from stdin
+vhs-rs demo.tape
 ```
 
-This produces `demo.gif` (animated), `proof.png` (screenshot), and `proof.txt` (the same screen as plain text — the artifact an agent actually reads).
+That's it. You get `demo.gif`, `proof.png`, and `proof.txt` — the screenshot's
+plain-text twin, which is the file a script (or an agent) actually wants to read.
 
-## The agent contract
+A few more ways to invoke it:
 
-Everything in this section is stable API: exit codes, the JSON report shape, forensics file naming, and the determinism guarantees.
+```sh
+vhs-rs run --json demo.tape        # same run, JSON report on stdout
+vhs-rs check demo.tape             # parse + validate only, runs nothing
+echo 'Type "date"' | vhs-rs run -  # tape from stdin
+```
 
-### Exit codes
+## Testing terminal programs
 
-| Code | Meaning                                              |
-| ---- | ---------------------------------------------------- |
-| 0    | success                                              |
-| 1    | `Assert` failure                                     |
-| 2    | parse/validation error (also from `vhs-rs check`)     |
-| 3    | `Wait` timeout                                       |
-| 4    | runtime error (I/O, PTY, missing `Require` binary)   |
+`Wait` and `Assert` are the whole story. `Wait` blocks until a regex matches
+the screen (checked every time the program writes output — there is no polling
+loop and no fixed sleep to tune). `Assert` checks the screen right now and
+fails the run if the pattern isn't there.
 
-### `--json` run report
+```elixir
+Type "cargo test 2>&1 | tail -2"
+Enter
+Wait                                  # prompt is back = command finished
+Assert+Screen /test result: ok/       # fail the run otherwise
+Capture evidence.txt                  # plain-text copy of the screen
+```
 
-`vhs-rs run --json` prints exactly one JSON object on stdout. Real output from the quickstart tape above (comments annotate; they are not part of the output):
+When something fails — an assert misses, a wait times out, the program
+crashes — vhs-rs writes two files next to your outputs before exiting:
+`<stem>.failure.txt` and `<stem>.failure.png`, the final screen as text and
+as an image. No flags, it just happens.
+
+<img alt="A failure forensics screenshot" src="examples/failure-forensics.png" width="500" />
+
+Exit codes tell you what went wrong without reading anything:
+
+| code | meaning |
+| ---- | ------- |
+| 0 | success |
+| 1 | an `Assert` failed |
+| 2 | the tape didn't parse (`vhs-rs check` uses this too) |
+| 3 | a `Wait` timed out |
+| 4 | runtime error (I/O, PTY, missing `Require` binary) |
+
+## For agents
+
+This is the part built for scripts and AI agents driving vhs-rs in a loop.
+The exit codes, JSON shape, forensics naming, and determinism rules below are
+stable API.
+
+`vhs-rs run --json` prints one JSON object on stdout: a record per command
+(with line numbers and timing), every artifact written, and on failure the
+exact screen text at the moment the check ran — so the caller can see *why* a
+pattern missed without opening a single file.
 
 ```jsonc
 {
-  "version": 1,                    // report schema version
-  "tape": "hello.tape",
-  "status": "success",             // success | assert_failed | parse_error
-                                   //   | wait_timeout | runtime_error
-  "exit_code": 0,                  // matches the process exit code
-  "duration_ms": 3657,
+  "version": 1,
+  "tape": "demo.tape",
+  "status": "assert_failed",        // success | assert_failed | parse_error
+  "exit_code": 1,                   //   | wait_timeout | runtime_error
   "term": { "cols": 77, "rows": 21, "shell": "bash" },
-  "commands": [                    // one record per executed command
-    { "index": 0, "line": 1, "col": 1,
-      "command": "Output .gif demo.gif", "status": "ok", "elapsed_ms": 0 },
-    { "index": 1, "line": 3, "col": 1,
-      "command": "Type echo hello from vhs-rs", "status": "ok", "elapsed_ms": 1070 },
-    { "index": 2, "line": 4, "col": 1,
-      "command": "Enter 1", "status": "ok", "elapsed_ms": 51 },
-    { "index": 3, "line": 5, "col": 1,
-      "command": "Wait Line", "status": "ok", "elapsed_ms": 0,
-      "detail": {                  // Wait/Assert carry their outcome
-        "elapsed_ms": 0, "matched": true, "regex": ">$", "scope": "Line" } },
-    { "index": 4, "line": 7, "col": 1,
-      "command": "Assert Screen hello from vhs-rs", "status": "ok", "elapsed_ms": 0,
-      "detail": { "matched": true, "regex": "hello from vhs-rs", "scope": "Screen" } },
-    { "index": 5, "line": 8, "col": 1,
-      "command": "Screenshot proof.png", "status": "ok", "elapsed_ms": 6,
-      "detail": { "path": "proof.png" } }
-  ],
-  "artifacts": [                   // every file the run produced
-    { "path": "proof.png", "kind": "png",  "command_index": 5 },
-    { "path": "proof.txt", "kind": "text", "command_index": 5 },
-    { "path": "demo.gif",  "kind": "gif" } // end-of-run outputs have no index
-  ]
-}
-```
-
-On failure the report gains a `failure` object and the failing command's `detail` includes `screen_text` — the exact text that was on screen at check time, so an agent can see *why* the pattern missed without opening any file:
-
-```jsonc
-{
-  "status": "assert_failed",
-  "exit_code": 1,
   "commands": [
-    // ...,
-    { "index": 5, "command": "Assert Screen status: 42", "status": "failed",
+    { "index": 3, "line": 9, "col": 1, "command": "Wait Line",
+      "status": "ok", "elapsed_ms": 132 },
+    { "index": 4, "line": 11, "col": 1, "command": "Assert Screen status: 42",
+      "status": "failed",
       "detail": { "matched": false, "regex": "status: 42", "scope": "Screen",
-                  "screen_text": "> echo status: 41\nstatus: 41\n>\n..." } }
+                  "screen_text": "> echo status: 41\nstatus: 41\n>" } },
+    { "index": 5, "line": 12, "col": 1, "command": "Screenshot proof.png",
+      "status": "skipped" }          // commands after a failure are skipped
   ],
-  "failure": {
-    "command_index": 5,            // which command failed
-    "reason": "assert_failed",     // assert_failed | wait_timeout | runtime_error
-    "message": "Assert /status: 42/ did not match Screen"
-  },
+  "failure": { "command_index": 4, "reason": "assert_failed",
+               "message": "Assert /status: 42/ did not match Screen" },
   "artifacts": [
-    { "path": "fail.failure.txt", "kind": "failure_text" },
-    { "path": "fail.failure.png", "kind": "failure_png" }
+    { "path": "demo.failure.txt", "kind": "failure_text" },
+    { "path": "demo.failure.png", "kind": "failure_png" }
   ]
 }
 ```
 
-`vhs-rs check --json` prints `{"ok": bool, "commands": N, "errors": [{"line", "col", "message"}]}`.
+`vhs-rs check --json` prints `{"ok", "commands", "errors": [{"line", "col", "message"}]}`.
 
-### Failure forensics — always on
+Two runs of the same tape produce byte-identical `.txt` artifacts — diff them
+and you have a regression test (this repo's own test suite does exactly that,
+see [`tests/golden.rs`](tests/golden.rs)). vhs-rs makes this hold by pinning
+the shell (`bash --noprofile --norc -i`), the prompt (`PS1="> "`, which the
+default `Wait` pattern matches), `TERM`, and the locale, and by waiting for
+the prompt before the first keystroke. It also sets `VHS_RS=1` in the child so
+your scripts can tell they're being recorded.
 
-On **any** failure (assert, wait timeout, runtime error) vhs-rs writes two files next to your outputs, no flags required:
+One caveat: everything else in the environment is inherited. If a command's
+output depends on some variable, pin it in the tape:
 
-- `<stem>.failure.txt` — the final screen as plain text
-- `<stem>.failure.png` — the same screen, rendered
+```elixir
+Env LS_COLORS "di=01;34:ex=01;32"
+```
 
-`<stem>` is the first `Output` path with its extension removed (e.g. `Output build/demo.gif` → `build/demo.failure.txt`); if the tape has no `Output`, the tape filename minus `.tape` is used. Both paths are listed in the JSON report's `artifacts`.
+## Installation
 
-### Screenshot's text sibling
+You'll need a Rust toolchain to build, and a Unix system with `bash` to run.
 
-Every `Screenshot foo.png` also writes `foo.txt` with the same screen as plain text — the agent's cheapest input, no vision model needed. The sibling swaps the extension, so don't give a `Screenshot` the same stem as an `Output something.txt`. `Capture bar.txt` writes text only, with no PNG.
+```sh
+git clone https://github.com/cbxss/vhs-rs && cd vhs-rs
+cargo build --release
+# → target/release/vhs-rs (~8 MB, no runtime dependencies)
+```
 
-### Determinism
+## The tape language
 
-Two runs of the same tape produce **byte-identical `.txt` artifacts** — diffing them is your regression signal (this repo's own golden test suite, `tests/golden.rs`, is exactly that). Guaranteed by pinning:
+The grammar is VHS's — existing tapes parse unchanged, and `vhs-rs check`
+flags anything it can't execute with `line:col` caret errors. Three commands
+are new, a couple behave differently, and video output is gone. Details:
 
-- shell: `bash --noprofile --norc -i` (or `sh -i` / `zsh -f -i` / `fish --no-config -i` via `Set Shell`)
-- environment: `TERM=xterm-256color`, `PS1="> "` (matches the default `WaitPattern` `>$`), `PROMPT_COMMAND=`, `HISTFILE=`, `LANG=LC_ALL=C.UTF-8`, plus `VHS_RS=1` so scripts can detect they're under automation
-- an **implicit initial Wait** for the prompt before the first command, eliminating the classic race where typing starts before the shell is up
+### Supported
 
-One caveat: the rest of the environment is inherited from the parent process. If a command's output depends on an inherited variable, pin it in the tape — e.g. `Env LS_COLORS "di=01;34:ex=01;32"` before using `ls --color`.
+`Type`, every key (`Enter`, `Tab`, `Backspace`, arrows, `PageUp`/`PageDown`,
+`Home`/`End`, …) with `[@speed] [count]`, chords (`Ctrl+Shift+O`, `Alt+.`),
+`Sleep`, `Wait[+Line|+Screen][@timeout] [/re/]`, `Screenshot`, `Hide`/`Show`,
+`Require`, `Env`, `Source`, `Copy`/`Paste`, `Output .gif/.txt/.ascii/.test`,
+and `Set` for the full VHS settings list. Arrow keys respect application
+cursor mode, so vim and fzf behave.
 
-## Tape language
+### New
 
-The grammar is VHS's, with three extensions (`Assert`, `Capture`, `Output .cast`). Existing `.tape` files parse unchanged; `vhs-rs check` flags anything vhs-rs cannot execute, with `line:col` caret errors.
-
-### Command support matrix
-
-**Supported (VHS-compatible)**
-
-| Command | Notes |
+| command | what it does |
 | --- | --- |
-| `Type[@speed] "text"` | per-character, PTY echo settles between chars |
-| `Enter`, `Space`, `Tab`, `Backspace`, `Delete`, `Insert`, `Escape` | all accept `[@speed] [count]` |
-| `Up` `Down` `Left` `Right`, `PageUp` `PageDown`, `Home` `End` | application-cursor mode (vim, fzf) handled automatically |
-| `Ctrl+X`, `Alt+X`, `Shift+X`, chords like `Ctrl+Shift+O` | modifiers before the key |
-| `Sleep <time>` | keeps draining output, so GIF timestamps stay accurate |
-| `Wait[+Line\|+Screen][@timeout] [/re/]` | event-driven; defaults: scope **Line**, pattern `WaitPattern`, timeout `WaitTimeout` |
-| `Screenshot x.png` | + automatic `x.txt` text sibling |
-| `Hide` / `Show` | gate GIF frames |
-| `Require <bin>` | checked before spawning anything; missing → exit 4 |
-| `Env KEY "value"` | only before the first action command |
-| `Source other.tape` | one level deep; inner `Source`/`Output` filtered |
-| `Copy "text"` / `Paste` | **internal clipboard only** — deviation from VHS, never touches the system clipboard |
-| `Output x.gif` / `x.txt` / `x.ascii` / `x.test` | `.txt`-family is VHS's golden format: full screen after every command + `─`×80 separator |
-| `Set <setting> <value>` | see [settings](#settings) |
+| `Assert[+Screen\|+Line][@timeout] /re/` | fail the run (exit 1) if the pattern isn't on screen; with `@timeout` it retries until the deadline |
+| `Capture x.txt` | dump the screen as plain text, right now |
+| `Output x.cast` | asciicast v3 event log ([asciinema](https://asciinema.org) format) |
+| `Output x.png` | final frame as a PNG |
 
-**New in vhs-rs**
+### Different or dropped
 
-| Command | Notes |
-| --- | --- |
-| `Assert[+Screen\|+Line][@timeout] /re/` | regex required; default scope **Screen**; immediate check, or retries event-driven until `@timeout`; mismatch → exit 1 + forensics |
-| `Capture x.txt` | dump the current screen as plain text, immediately |
-| `Output x.png` | final frame as PNG |
-| `Output x.cast` | asciicast v3 (asciinema) event log |
+- `Output x.mp4` / `x.webm` — dropped; video needs ffmpeg, which is the kind
+  of dependency this project exists to not have. Make a `.gif` or `.cast`.
+- `Copy`/`Paste` use an internal clipboard, never the system one.
+- `Set FontFamily` is accepted but ignored — the font is embedded
+  (JetBrains Mono, with a Nerd Font symbols fallback so powerline glyphs work).
+- `ScrollUp`/`ScrollDown` send real mouse-wheel events when the program has
+  enabled mouse reporting (vim, htop, fzf); otherwise they warn and do nothing.
 
-**Conditional**
+### Things that will bite you exactly once
 
-- `ScrollUp` / `ScrollDown` — sent as SGR mouse-wheel events **when the child program has enabled mouse reporting** (vim, fzf, htop, …). If it hasn't, the command warns and is a no-op: a plain shell has no scrollback to move in a fixed screen.
-
-**Dropped** (rejected by `vhs-rs check`, exit 2)
-
-- `Output x.mp4` / `x.webm` — video encoding requires ffmpeg; out of scope for a zero-dependency binary. Generate a `.gif` or `.cast` instead
-- `Output frames/` (PNG frame directories)
-- `Set FontFamily` — vhs-rs renders with an embedded JetBrains Mono; ignored with a warning
-
-### Quirks worth knowing
-
-- **Quote absolute paths.** A leading `/` starts a regex token, so `Screenshot /tmp/x.png` is a parse error — write `Screenshot "/tmp/x.png"`.
-- **`Wait` defaults to scope `Line`** (the cursor's row — right for "the prompt is back"); **`Assert` defaults to scope `Screen`** (right for "the output appeared somewhere"). Override with `+Line`/`+Screen`.
-- **Mid-tape `Set` is restricted.** Terminal geometry is fixed once the shell spawns, so after the first action command only `TypingSpeed`, `WaitTimeout`, `WaitPattern`, `PlaybackSpeed`, and `Theme` may be `Set`; anything else is a `check`-time error (VHS silently ignores these — vhs-rs refuses).
-- Strings take `"`, `'`, or `` ` `` quotes with **no escape sequences**, so `Type "printf '\e[31mred\e[0m\n'"` sends the backslashes literally to the shell. Adjacent string literals after one `Type` are joined with a single space.
-- `Wait` without a regex uses the current `WaitPattern`; `Assert` always requires a regex.
+- Quote absolute paths: `/` starts a regex, so it's `Screenshot "/tmp/x.png"`.
+- `Wait` defaults to scope `Line` (the cursor's row — right for "is the prompt
+  back"). `Assert` defaults to `Screen` (right for "did it print anywhere").
+- Strings have no escape sequences. `Type "printf '\n'"` sends a literal
+  backslash-n to the shell, which is usually what you want.
+- After the first action command, only `TypingSpeed`, `WaitTimeout`,
+  `WaitPattern`, `PlaybackSpeed`, and `Theme` may be `Set` — the terminal's
+  geometry is fixed once the shell spawns. VHS silently ignores late setting
+  changes; vhs-rs makes them a `check` error.
 
 ### Settings
 
-Defaults are VHS's. "Mid-tape" marks the settings allowed after commands have started.
+Defaults match VHS: 1200×600 canvas, padding 60, font size 22, typing speed
+50ms, wait timeout 15s, wait pattern `>$`. Plus `Theme` (348 built-in names or
+inline JSON), `WindowBar` (`Colorful`, `ColorfulRight`, `Rings`, `RingsRight`),
+`BorderRadius`, `Margin`/`MarginFill`, `LetterSpacing`, `LineHeight`,
+`Framerate` (GIF max fps, capped at 50), `PlaybackSpeed`, `LoopOffset`,
+`CursorBlink` (on by default), and `Shell` (`bash`, `sh`, `zsh`, `fish` — each
+spawned with its no-config flags).
 
-| Setting | Default | Mid-tape | Notes |
-| --- | --- | --- | --- |
-| `Shell` | `bash` | no | `bash`/`sh`/`zsh`/`fish` get pinned no-config flags; anything else runs verbatim |
-| `Width` × `Height` | 1200 × 600 | no | canvas pixels; cols/rows derive from font metrics |
-| `Padding` | 60 | no | |
-| `Margin` / `MarginFill` | 0 / theme background | no | `MarginFill` takes `#rrggbb` |
-| `WindowBar` / `WindowBarSize` | none / 30 | no | `Colorful`, `ColorfulRight`, `Rings`, `RingsRight` |
-| `BorderRadius` | 0 | no | |
-| `FontSize` | 22 | no | |
-| `LineHeight` | 1.0 | no | |
-| `LetterSpacing` | 1.0 | no | pixels (xterm.js semantics) |
-| `TypingSpeed` | 50ms | yes | per-keystroke delay |
-| `PlaybackSpeed` | 1.0 | yes | GIF time scaling |
-| `Framerate` | 50 | no | GIF max fps, capped at 50 |
-| `WaitTimeout` | 15s | yes | default deadline for `Wait`/`Assert@` |
-| `WaitPattern` | `>$` | yes | default regex for `Wait` (matches the pinned `PS1`) |
-| `Theme` | VHS default (dark) | yes | 348 built-in names (`Set Theme "Dracula"`) or inline JSON |
-| `CursorBlink` | `true` | no | blinking block cursor in GIFs (530ms cadence, frames synthesized during idle) |
-| `LoopOffset` | 0% | no | start the GIF loop N% into the timeline (`Set LoopOffset 20%`) |
-| `FontFamily` | — | — | parsed, ignored with a warning (embedded font) |
+## How is this different from VHS?
+
+VHS records a headless Chromium rendering xterm.js served by ttyd, and
+stitches frames with ffmpeg. That works, and its GIFs are lovely, but it's a
+lot of machinery — and it can't assert on anything, its `Wait` polls the
+browser every 10ms, and a failed render can still exit 0.
+
+vhs-rs keeps the tape language and does the terminal work itself:
+
+|  | VHS | vhs-rs |
+| --- | --- | --- |
+| runtime deps | Chromium, ttyd, ffmpeg | none |
+| `Wait` | polls via JS eval | event-driven, re-checked per output chunk |
+| assertions | — | `Assert`, exit code 1 |
+| machine output | prose on stderr | `--json` report |
+| failure artifacts | — | screen dumped as `.txt` + `.png`, always |
+| `.mp4`/`.webm` | yes | no |
 
 ## Examples
 
 All in [`examples/`](examples/), all pass `vhs-rs check`:
 
 - [`demo.tape`](examples/demo.tape) — shell session to GIF + screenshot
-- [`agent-check.tape`](examples/agent-check.tape) — the core agent workflow: run, wait, assert, capture text evidence
-- [`tui.tape`](examples/tui.tape) — drives a full-screen TUI (vi): insert text, save, verify from the shell
-- [`theme-gallery.tape`](examples/theme-gallery.tape) — one run, several themes via mid-tape `Set Theme`
-- [`failure-demo.tape`](examples/failure-demo.tape) — deliberately failing `Assert` demonstrating exit 1 + forensics
+- [`agent-check.tape`](examples/agent-check.tape) — run, wait, assert, capture
+- [`tui.tape`](examples/tui.tape) — drives vi: insert text, save, verify
+- [`theme-gallery.tape`](examples/theme-gallery.tape) — several themes, one run
+- [`failure-demo.tape`](examples/failure-demo.tape) — a deliberate failure and
+  the forensics it leaves behind
+- [`readme.tape`](examples/readme.tape) — the GIF at the top of this page
 
 ## Credits
 
-- [charmbracelet/vhs](https://github.com/charmbracelet/vhs) (MIT) — the tape language, defaults, and `themes.json`; vhs-rs's parser is a faithful port of VHS's
-- [asciinema](https://github.com/asciinema/asciinema) — the [avt](https://crates.io/crates/avt) terminal emulator and the PTY-handling patterns vhs-rs's session engine is modeled on; `Output .cast` follows asciicast v3
-- [JetBrains Mono](https://www.jetbrains.com/lp/mono/) (Nerd Font build, embedded) — [SIL OFL 1.1](assets/fonts/OFL.txt)
+vhs-rs stands on three excellent projects:
+[charmbracelet/vhs](https://github.com/charmbracelet/vhs) (the tape language,
+the default look, and the theme catalog — the parser here is a faithful port),
+[asciinema](https://github.com/asciinema/asciinema) (the
+[avt](https://crates.io/crates/avt) terminal emulator at the core of the
+screen model, the PTY patterns, and the asciicast format), and
+[JetBrains Mono](https://www.jetbrains.com/lp/mono/) (embedded under the
+[SIL OFL 1.1](assets/fonts/OFL.txt), with
+[Nerd Fonts](https://github.com/ryanoasis/nerd-fonts) symbols as fallback).
+
+MIT licensed.
