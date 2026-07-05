@@ -138,24 +138,44 @@ fn check_reads_tape_from_stdin() {
     assert_eq!(out.status.code(), Some(2));
 }
 
-#[test]
-fn run_reads_tape_from_stdin() {
-    // Runtime is not wired up yet: a clean tape must reach the (stubbed)
-    // evaluator hand-off and exit 4, not die earlier with a different code.
-    let out = run_with_stdin(&["run", "-"], OK_TAPE);
-    assert_eq!(out.status.code(), Some(4));
+/// A minimal fast tape writing its golden to an absolute temp path.
+fn runtime_tape(tag: &str) -> (String, std::path::PathBuf) {
+    let out = std::env::temp_dir().join(format!("vterm_cli_{}_{}.txt", tag, std::process::id()));
+    let tape = format!(
+        "Output \"{}\"\nSet TypingSpeed 5ms\nType \"echo hi\"\nEnter\nWait\nAssert+Screen /hi/\n",
+        out.display()
+    );
+    (tape, out)
 }
 
 #[test]
-fn run_clean_tape_exits_four_for_now() {
-    let tape = TempTape::new("run_clean", OK_TAPE);
-    let out = vterm(&["run", tape.path()]).output().expect("run vterm");
-    assert_eq!(out.status.code(), Some(4));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("not implemented yet"),
-        "unexpected stderr: {stderr}"
+fn run_reads_tape_from_stdin() {
+    let (tape, out_path) = runtime_tape("stdin");
+    let out = run_with_stdin(&["run", "-"], &tape);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    let golden = std::fs::read_to_string(&out_path).expect("golden written");
+    assert!(golden.contains("echo hi"), "golden content: {golden}");
+    let _ = std::fs::remove_file(out_path);
+}
+
+#[test]
+fn run_clean_tape_executes_end_to_end() {
+    let (tape_src, out_path) = runtime_tape("run");
+    let tape = TempTape::new("run_clean", &tape_src);
+    let out = vterm(&["run", tape.path()]).output().expect("run vterm");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out_path.exists(), "golden artifact missing");
+    let _ = std::fs::remove_file(out_path);
 }
 
 #[test]
@@ -172,14 +192,66 @@ fn run_bad_tape_exits_two() {
 
 #[test]
 fn bare_tape_argument_defaults_to_run() {
-    let tape = TempTape::new("default_run", OK_TAPE);
+    let (tape_src, out_path) = runtime_tape("bare");
+    let tape = TempTape::new("default_run", &tape_src);
     let out = vterm(&[tape.path()]).output().expect("run vterm");
-    assert_eq!(out.status.code(), Some(4));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("not implemented yet"),
-        "unexpected stderr: {stderr}"
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    assert!(out_path.exists(), "golden artifact missing");
+    let _ = std::fs::remove_file(out_path);
+}
+
+#[test]
+fn run_failing_assert_exits_one_with_forensics_and_json() {
+    let dir = std::env::temp_dir().join(format!("vterm_forensics_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out_txt = dir.join("f.txt");
+    let tape_src = format!(
+        "Output \"{}\"\nSet TypingSpeed 5ms\nType \"echo hi\"\nEnter\nWait\nAssert+Screen /never matches xyz/\n",
+        out_txt.display()
+    );
+    let tape = TempTape::new("run_fail", &tape_src);
+    let out = vterm(&["run", "--json", tape.path()])
+        .output()
+        .expect("run vterm");
+    assert_eq!(out.status.code(), Some(1));
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout is a JSON report");
+    assert_eq!(v["status"], "assert_failed");
+    assert_eq!(v["exit_code"], 1);
+    let last = v["commands"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["status"], "failed");
+    assert!(
+        last["detail"]["screen_text"]
+            .as_str()
+            .unwrap()
+            .contains("echo hi"),
+        "failure detail must embed the actual screen"
+    );
+    assert!(dir.join("f.failure.txt").exists(), "failure text forensics");
+    assert!(dir.join("f.failure.png").exists(), "failure png forensics");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn run_wait_timeout_exits_three() {
+    let tape_src =
+        "Set TypingSpeed 5ms\nType \"echo hi\"\nEnter\nWait+Screen@1s /never matches xyz/\n";
+    let tape = TempTape::new("run_timeout", tape_src);
+    let out = vterm(&["run", "--quiet", tape.path()])
+        .output()
+        .expect("run vterm");
+    assert_eq!(out.status.code(), Some(3));
+    // Forensics stem falls back to the tape path.
+    let stem = tape.path().trim_end_matches(".tape").to_string();
+    assert!(std::path::Path::new(&format!("{stem}.failure.txt")).exists());
+    let _ = std::fs::remove_file(format!("{stem}.failure.txt"));
+    let _ = std::fs::remove_file(format!("{stem}.failure.png"));
 }
 
 #[test]

@@ -144,11 +144,7 @@ fn run(args: RunArgs) -> i32 {
         return ExitKind::Parse as i32;
     }
 
-    // TODO: hand off to evaluator::run(commands, args.json, args.quiet) and
-    // return its ExitKind as i32 — this is the single integration point.
-    let _ = (&commands, args.json, args.quiet);
-    eprintln!("vterm: run is not implemented yet (session engine in progress)");
-    ExitKind::Runtime as i32
+    crate::evaluator::run(path, &commands, args.json, args.quiet)
 }
 
 fn check(args: CheckArgs) -> i32 {
