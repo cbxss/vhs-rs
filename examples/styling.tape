@@ -39,9 +39,12 @@ Set CursorBlink true     # synthesize cursor blinks during idle gaps
 
 # ---- Hide the boring setup ---------------------------------------------------
 # Nothing between Hide and Show is recorded: use it to cut clears, cd's, and
-# environment prep out of the final GIF.
+# environment prep out of the final GIF. Defining the noisy printf as a
+# function here means the on-camera keystrokes stay clean — the viewer sees
+# `colors`, not a wall of escape codes. (Tape strings have no escape
+# sequences: `\e` reaches bash verbatim, which is exactly what printf wants.)
 Hide
-Type "clear"
+Type "colors() { printf '\e[1;35mbold magenta\e[0m  \e[32mgreen\e[0m  \e[4;34munderlined blue\e[0m\n'; }; clear"
 Enter
 Wait
 Show
@@ -52,9 +55,7 @@ Sleep 500ms              # a beat before Enter lets the eye catch up
 Enter
 Wait
 
-# Tape strings have no escape sequences: `\e` passes through to bash verbatim,
-# which is exactly what printf wants.
-Type "printf '\e[1;35mbold magenta\e[0m  \e[32mgreen\e[0m  \e[4;34munderlined blue\e[0m\n'"
+Type "colors"
 Sleep 400ms
 Enter
 Wait
