@@ -7,7 +7,7 @@
 
 Set TypingSpeed 20ms
 
-Type "printf '\\e[31mred\\e[0m \\e[32mgreen\\e[0m \\e[34mblue\\e[0m \\e[1mbold\\e[0m\\n'"
+Type "printf '\e[31mred\e[0m \e[32mgreen\e[0m \e[34mblue\e[0m \e[1mbold\e[0m\n'"
 Enter
 Wait
 

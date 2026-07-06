@@ -10,5 +10,9 @@
 /agent-check.txt
 /agent-check-screen.txt
 /failure-demo.txt
+/styling.gif
+/styling.png
+/styling.txt
+/theme-*.png
 *.failure.txt
 *.failure.png

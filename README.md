@@ -269,6 +269,8 @@ All in [`examples/`](examples/), all pass `vhs-rs check`:
 - [`demo.tape`](examples/demo.tape) — shell session to GIF + screenshot
 - [`agent-check.tape`](examples/agent-check.tape) — run, wait, assert, capture
 - [`tui.tape`](examples/tui.tape) — drives vi: insert text, save, verify
+- [`styling.tape`](examples/styling.tape) — every visual setting, annotated:
+  themes, window bars, margins, motion pacing, Hide/Show
 - [`theme-gallery.tape`](examples/theme-gallery.tape) — several themes, one run
 - [`failure-demo.tape`](examples/failure-demo.tape) — a deliberate failure and
   the forensics it leaves behind
