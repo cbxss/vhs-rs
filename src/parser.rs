@@ -182,10 +182,14 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Optional repeat count, defaults to "1".
+    /// Optional repeat count, defaults to "1". Rejects counts that don't fit
+    /// a `usize` — the resolver would otherwise coerce them silently.
     fn parse_repeat(&mut self) -> String {
         if self.peek.token_type == TokenType::Number {
             let count = self.peek.literal.clone();
+            if count.parse::<usize>().is_err() {
+                self.error(self.peek.clone(), format!("Invalid repeat count: {count}"));
+            }
             self.next_token();
             count
         } else {
@@ -215,6 +219,13 @@ impl<'a> Parser<'a> {
             self.next_token();
         } else {
             t.push('s');
+        }
+        // Every `@speed`, `Sleep`, and `Set WaitTimeout` time funnels through
+        // here: reject values Duration can't represent (parse_duration
+        // returns None for them) so `check` catches what would otherwise
+        // surface at run time.
+        if parse_duration(&t).is_none() {
+            self.error(self.cur.clone(), format!("Invalid duration: {t}"));
         }
         t
     }
