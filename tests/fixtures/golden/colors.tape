@@ -17,7 +17,9 @@ Type `cd "$(mktemp -d)" && mkdir sub && touch plain.txt run.sh && chmod +x run.s
 Enter
 Wait
 
-Type "ls --color=always"
+# -1 (one entry per line): GNU and BSD ls pad multi-column layouts
+# differently, and this golden must be byte-identical on Linux and macOS.
+Type "ls -1 --color=always"
 Enter
 Wait
 

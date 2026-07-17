@@ -220,29 +220,6 @@ edit-right
 ────────────────────────────────────────────────────────────────────────────────
 > echo edit-right
 edit-right
-> this will never run
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-────────────────────────────────────────────────────────────────────────────────
-> echo edit-right
-edit-right
-> this will never run^C
 >
 
 
@@ -261,10 +238,10 @@ edit-right
 
 
 
+
 ────────────────────────────────────────────────────────────────────────────────
 > echo edit-right
 edit-right
-> this will never run^C
 >
 
 
@@ -283,32 +260,10 @@ edit-right
 
 
 
-────────────────────────────────────────────────────────────────────────────────
-> echo edit-right
-edit-right
-> this will never run^C
->
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 ────────────────────────────────────────────────────────────────────────────────
 > echo edit-right
 edit-right
-> this will never run^C
 > echo done
 
 
@@ -327,10 +282,10 @@ edit-right
 
 
 
+
 ────────────────────────────────────────────────────────────────────────────────
 > echo edit-right
 edit-right
-> this will never run^C
 > echo done
 done
 >
@@ -349,10 +304,10 @@ done
 
 
 
+
 ────────────────────────────────────────────────────────────────────────────────
 > echo edit-right
 edit-right
-> this will never run^C
 > echo done
 done
 >
@@ -371,13 +326,14 @@ done
 
 
 
+
 ────────────────────────────────────────────────────────────────────────────────
 > echo edit-right
 edit-right
-> this will never run^C
 > echo done
 done
 >
+
 
 
 

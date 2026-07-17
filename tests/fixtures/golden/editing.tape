@@ -1,6 +1,8 @@
 # editing.tape — multi-command line editing: fix a typo with Backspace, then
-# cancel a half-typed command with Ctrl+C. All output is self-generated, so
-# the golden is machine-independent.
+# abandon a half-typed command with Ctrl+U (kill line). All output is
+# self-generated, so the golden is machine-independent. (Ctrl+C would read
+# better, but bash 5 echoes `^C` where bash 3.2 — macOS — echoes nothing,
+# and this golden must be byte-identical on both.)
 
 Output editing.txt
 
@@ -16,11 +18,7 @@ Wait
 Assert /edit-right/
 
 Type "this will never run"
-# Ctrl+C settles for one TypingSpeed; slow it down so the ^C echo and the new
-# prompt are on screen before the golden frame is recorded.
-Set TypingSpeed 300ms
-Ctrl+C
-Set TypingSpeed 10ms
+Ctrl+U
 Wait
 
 Type "echo done"
