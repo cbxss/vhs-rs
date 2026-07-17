@@ -670,7 +670,7 @@ fn one_line(s: &str) -> String {
 }
 
 /// Output extensions vhs_rs can produce.
-const SUPPORTED_OUTPUTS: &[&str] = &[".gif", ".png", ".txt", ".ascii", ".test", ".cast"];
+const SUPPORTED_OUTPUTS: &[&str] = &[".gif", ".png", ".txt", ".ascii", ".test", ".cast", ".jsonl"];
 
 /// Settings that may change mid-tape (everything else is frozen once the
 /// terminal has spawned, because canvas geometry is fixed).

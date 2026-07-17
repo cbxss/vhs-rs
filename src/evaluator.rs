@@ -19,6 +19,7 @@ use crate::session::Session;
 use crate::snapshot::{SessionEvent, SessionEventKind};
 use crate::term::Term;
 use crate::theme::{self, Rgb, Theme};
+use crate::timeline::{CommandMarker, TIMELINE_VERSION, TimelineHeader, TimelineWriter};
 use crate::token::TokenType;
 use crate::util::parse_duration;
 use regex::Regex;
@@ -85,14 +86,17 @@ enum RunOutcome {
 }
 
 /// Entry point called by the CLI after parse+validate succeeded. `timeout`
-/// is the whole-run wall-clock budget (`--timeout`); on SIGINT/SIGTERM the
-/// report is still finalized and printed before exiting.
+/// is the whole-run wall-clock budget (`--timeout`); `record` is the
+/// `--record` timeline path (in addition to any `Output x.jsonl` targets).
+/// On SIGINT/SIGTERM the report is still finalized and printed before
+/// exiting.
 pub fn run(
     tape_name: &str,
     commands: &[Command],
     json: bool,
     quiet: bool,
     timeout: Option<Duration>,
+    record: Option<&str>,
 ) -> i32 {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -108,7 +112,7 @@ pub fn run(
     let mut report = ReportBuilder::new(tape_name);
     let outcome = rt.block_on(async {
         let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
-        let fut = run_inner(tape_name, commands, &mut report, quiet, deadline);
+        let fut = run_inner(tape_name, commands, &mut report, quiet, deadline, record);
         let (Ok(mut sigterm), Ok(mut sigint)) = (
             signal(SignalKind::terminate()),
             signal(SignalKind::interrupt()),
@@ -155,6 +159,7 @@ async fn run_inner(
     report: &mut ReportBuilder,
     quiet: bool,
     deadline: Option<tokio::time::Instant>,
+    record: Option<&str>,
 ) -> ExitKind {
     // ---- Typed resolution side table: everything the parser already
     // validated (durations, counts, Wait/Assert scopes and regexes) lifted
@@ -276,6 +281,42 @@ async fn run_inner(
     // and forensics naming.
     let mut registry = ArtifactRegistry::new(&outputs, tape_name, quiet);
 
+    // Streaming timeline recorders: every `Output x.jsonl` target plus
+    // `--record`. Created (header written) before anything runs, so even a
+    // killed run leaves a renderable file. Note the header carries the
+    // preamble settings; a mid-tape `Set PlaybackSpeed` affects this run's
+    // own GIF but not a later `render` of the recording.
+    let jsonl_targets: Vec<String> = outputs
+        .iter()
+        .filter(|(ext, _)| ext == ".jsonl")
+        .map(|(_, path)| path.clone())
+        .chain(record.map(String::from))
+        .collect();
+    let header = TimelineHeader {
+        version: TIMELINE_VERSION,
+        cols,
+        rows,
+        shell: settings.shell.clone(),
+        tape: Some(tape_name.to_string()),
+        theme: initial_theme.clone(),
+        render: settings.render.clone(),
+        cursor_blink: settings.cursor_blink,
+        max_fps: settings.max_fps,
+        playback_speed: settings.playback_speed,
+        loop_offset: settings.loop_offset,
+    };
+    let mut recorder = match Recorder::create(&jsonl_targets, &header) {
+        Ok(r) => r,
+        Err((path, e)) => {
+            report.set_failure(
+                None,
+                ExitKind::Runtime.reason(),
+                format!("failed to create timeline {path}: {e}"),
+            );
+            return ExitKind::Runtime;
+        }
+    };
+
     // Implicit initial wait for the prompt — removes the classic race where
     // typing starts before the shell is up. A missing prompt is a warning
     // (custom shells may prompt differently), but a child that already
@@ -352,6 +393,19 @@ async fn run_inner(
         });
 
         let elapsed = step_start.elapsed();
+        if recorder.active() {
+            recorder.observe(
+                &session,
+                &theme_timeline,
+                &CommandMarker {
+                    index,
+                    line: cmd.token.line,
+                    command: cmd.to_string(),
+                    status: if result.is_ok() { "ok" } else { "failed" }.into(),
+                    elapsed_ms: elapsed.as_millis() as u64,
+                },
+            );
+        }
         match result {
             Ok(detail) => {
                 report.record(index, cmd, CommandStatus::Ok, elapsed, detail);
@@ -405,10 +459,15 @@ async fn run_inner(
 
     // ---- Teardown before encoding (frees the child; events are all captured).
     let _ = session.shutdown().await;
+    // The shutdown drain + Exit event are the timeline's final lines.
+    recorder.sync_events(&session);
 
     // ---- End-of-run outputs. Encode errors are real failures (unlike VHS).
     for (ext, path) in &outputs {
         let result = match ext.as_str() {
+            // Already streamed while the run happened; the recorder records
+            // the artifact (and any write failure) below.
+            ".jsonl" => continue,
             ".txt" | ".ascii" | ".test" => {
                 golden.save(Path::new(path)).map(|_| ArtifactKind::Golden)
             }
@@ -477,8 +536,104 @@ async fn run_inner(
         }
     }
 
+    recorder.finish(&mut registry, report, &mut exit);
     registry.drain_into(report);
     exit
+}
+
+/// The set of live timeline writers for one run (`Output x.jsonl` targets +
+/// `--record`), with per-writer failure isolation: a writer that errors
+/// mid-run stops receiving events and surfaces as a failed artifact at the
+/// end, without aborting the run or the other writers.
+struct Recorder {
+    writers: Vec<(String, TimelineWriter)>,
+    failed: Vec<(String, std::io::Error)>,
+    themes_written: usize,
+}
+
+impl Recorder {
+    /// Opens a writer (and writes the header) for every path. Creation
+    /// failure is fatal — a run that can't produce a requested artifact
+    /// should not start.
+    fn create(paths: &[String], header: &TimelineHeader) -> Result<Self, (String, std::io::Error)> {
+        let mut writers = Vec::with_capacity(paths.len());
+        for path in paths {
+            match TimelineWriter::create(Path::new(path), header) {
+                Ok(w) => writers.push((path.clone(), w)),
+                Err(e) => return Err((path.clone(), e)),
+            }
+        }
+        Ok(Self {
+            writers,
+            failed: Vec::new(),
+            themes_written: 0,
+        })
+    }
+
+    fn active(&self) -> bool {
+        !self.writers.is_empty()
+    }
+
+    /// Streams everything new since the last call: session events, theme
+    /// changes, and the just-finished command's marker.
+    fn observe(
+        &mut self,
+        session: &Session,
+        theme_timeline: &[(Duration, Theme)],
+        marker: &CommandMarker,
+    ) {
+        self.each(|w| w.sync(session.events()));
+        while self.themes_written < theme_timeline.len() {
+            let (time, theme) = &theme_timeline[self.themes_written];
+            let (time, theme) = (*time, theme.clone());
+            self.each(|w| w.write_theme(time, &theme));
+            self.themes_written += 1;
+        }
+        let time = session.elapsed();
+        self.each(|w| w.write_command(time, marker));
+    }
+
+    /// Streams any not-yet-written session events (the teardown tail).
+    fn sync_events(&mut self, session: &Session) {
+        self.each(|w| w.sync(session.events()));
+    }
+
+    /// Records surviving writers as artifacts and failed ones as run
+    /// failures (runtime exit, first failure message wins in the report).
+    fn finish(
+        self,
+        registry: &mut ArtifactRegistry,
+        report: &mut ReportBuilder,
+        exit: &mut ExitKind,
+    ) {
+        for (path, _) in self.writers {
+            registry.record(path, ArtifactKind::Timeline, None);
+        }
+        for (path, e) in self.failed {
+            report.set_failure(
+                None,
+                ExitKind::Runtime.reason(),
+                format!("failed to write {path}: {e}"),
+            );
+            if *exit == ExitKind::Success {
+                *exit = ExitKind::Runtime;
+            }
+        }
+    }
+
+    /// Applies `f` to every live writer, retiring writers that fail.
+    fn each(&mut self, mut f: impl FnMut(&mut TimelineWriter) -> std::io::Result<()>) {
+        let mut i = 0;
+        while i < self.writers.len() {
+            match f(&mut self.writers[i].1) {
+                Ok(()) => i += 1,
+                Err(e) => {
+                    let (path, _) = self.writers.remove(i);
+                    self.failed.push((path, e));
+                }
+            }
+        }
+    }
 }
 
 /// Executes one command from its typed resolution (`res` carries everything

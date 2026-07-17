@@ -67,6 +67,11 @@ struct RunArgs {
     /// with exit 4, reason `run_timeout`, and still writes report + forensics
     #[arg(long, value_parser = parse_timeout)]
     timeout: Option<Duration>,
+
+    /// Stream the session to a .jsonl timeline as it runs (crash-safe;
+    /// render it later with `vhs-rs render`)
+    #[arg(long, value_name = "PATH")]
+    record: Option<String>,
 }
 
 fn parse_timeout(s: &str) -> Result<Duration, String> {
@@ -228,7 +233,14 @@ fn run(args: RunArgs) -> i32 {
             Err(code) => return code,
         };
 
-    crate::evaluator::run(&path, &commands, args.json, args.quiet, args.timeout)
+    crate::evaluator::run(
+        &path,
+        &commands,
+        args.json,
+        args.quiet,
+        args.timeout,
+        args.record.as_deref(),
+    )
 }
 
 fn check(args: CheckArgs) -> i32 {
