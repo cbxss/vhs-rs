@@ -10,6 +10,7 @@ repository = "https://github.com/cbxss/vhs-rs"
 readme = "README.md"
 keywords = ["terminal", "gif", "testing", "vhs", "pty"]
 categories = ["command-line-utilities", "development-tools::testing"]
+exclude = [".github/", "install.sh"]
 
 [dependencies]
 avt = "0.18"
