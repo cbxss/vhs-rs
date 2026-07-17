@@ -13,6 +13,11 @@ use crate::snapshot::Color;
 pub struct Rgb(pub u8, pub u8, pub u8);
 
 impl Rgb {
+    /// Formats as `#rrggbb` (the inverse of [`Rgb::from_hex`]).
+    pub fn to_hex(self) -> String {
+        format!("#{:02x}{:02x}{:02x}", self.0, self.1, self.2)
+    }
+
     /// Parses `#rrggbb`, `rrggbb`, `#rgb`, or `rgb` (VHS's parseHexColor set).
     pub fn from_hex(s: &str) -> Option<Self> {
         let hex = s.strip_prefix('#').unwrap_or(s);
@@ -79,6 +84,48 @@ pub struct Theme {
     pub foreground: Rgb,
     pub cursor: Rgb,
     pub selection: Rgb,
+}
+
+/// Serializes with every field written (name + all 19 colors, camelCase keys,
+/// `#rrggbb` values) so a serialized theme round-trips through the overlay
+/// deserializer exactly — nothing is left to be derived from fg/bg.
+impl serde::Serialize for Theme {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut m = s.serialize_map(Some(21))?;
+        m.serialize_entry("name", &self.name)?;
+        m.serialize_entry("black", &self.black.to_hex())?;
+        m.serialize_entry("red", &self.red.to_hex())?;
+        m.serialize_entry("green", &self.green.to_hex())?;
+        m.serialize_entry("yellow", &self.yellow.to_hex())?;
+        m.serialize_entry("blue", &self.blue.to_hex())?;
+        m.serialize_entry("magenta", &self.magenta.to_hex())?;
+        m.serialize_entry("cyan", &self.cyan.to_hex())?;
+        m.serialize_entry("white", &self.white.to_hex())?;
+        m.serialize_entry("brightBlack", &self.bright_black.to_hex())?;
+        m.serialize_entry("brightRed", &self.bright_red.to_hex())?;
+        m.serialize_entry("brightGreen", &self.bright_green.to_hex())?;
+        m.serialize_entry("brightYellow", &self.bright_yellow.to_hex())?;
+        m.serialize_entry("brightBlue", &self.bright_blue.to_hex())?;
+        m.serialize_entry("brightMagenta", &self.bright_magenta.to_hex())?;
+        m.serialize_entry("brightCyan", &self.bright_cyan.to_hex())?;
+        m.serialize_entry("brightWhite", &self.bright_white.to_hex())?;
+        m.serialize_entry("background", &self.background.to_hex())?;
+        m.serialize_entry("foreground", &self.foreground.to_hex())?;
+        m.serialize_entry("cursor", &self.cursor.to_hex())?;
+        m.serialize_entry("selection", &self.selection.to_hex())?;
+        m.end()
+    }
+}
+
+/// Deserializes through the same overlay path as `Set Theme {json}`: partial
+/// themes get default-theme fill-in, cursor/selection derive from fg/bg when
+/// absent.
+impl<'de> serde::Deserialize<'de> for Theme {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = RawTheme::deserialize(d)?;
+        raw.apply(default_theme()).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Raw JSON form of a theme: every field optional so partial inline themes
@@ -317,6 +364,32 @@ mod tests {
         assert_eq!(t.magenta, Rgb(1, 2, 3));
         assert_eq!(t.cursor, Rgb(4, 5, 6));
         assert_eq!(t.selection, Rgb(7, 8, 9));
+    }
+
+    #[test]
+    fn serde_round_trips_exactly() {
+        // Serialization writes all fields, so the overlay deserializer must
+        // reproduce the theme bit-for-bit — including a cursor/selection that
+        // do NOT match the derive-from-fg/bg fallback.
+        let mut theme = load_builtin("dracula").unwrap();
+        theme.cursor = Rgb(0x01, 0x02, 0x03);
+        theme.selection = Rgb(0x0a, 0x0b, 0x0c);
+
+        let json = serde_json::to_string(&theme).unwrap();
+        let back: Theme = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, theme);
+
+        // And the wire format is the familiar hex-object shape.
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["cursor"], "#010203");
+        assert_eq!(v["brightBlack"], theme.bright_black.to_hex());
+    }
+
+    #[test]
+    fn rgb_hex_round_trip() {
+        for c in [Rgb(0, 0, 0), Rgb(255, 255, 255), Rgb(0x12, 0xab, 0x03)] {
+            assert_eq!(Rgb::from_hex(&c.to_hex()), Some(c));
+        }
     }
 
     #[test]

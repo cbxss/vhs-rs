@@ -86,8 +86,9 @@ impl Canvas {
     }
 }
 
-/// Window bar styles, matching VHS's `Set WindowBar` values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Window bar styles, matching VHS's `Set WindowBar` values. Serializes as
+/// the `Set WindowBar` string (`"Colorful"`, ...).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BarStyle {
     Colorful,
     ColorfulRight,
@@ -116,9 +117,34 @@ pub enum MarginFill {
     Theme,
 }
 
+/// Wire format: `null` = theme background, `"#rrggbb"` = fixed color.
+impl serde::Serialize for MarginFill {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Theme => s.serialize_none(),
+            Self::Color(c) => s.serialize_str(&c.to_hex()),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for MarginFill {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match Option::<String>::deserialize(d)? {
+            None => Ok(Self::Theme),
+            Some(hex) => Rgb::from_hex(&hex).map(Self::Color).ok_or_else(|| {
+                serde::de::Error::custom(format!("margin_fill {hex:?}: not a #rrggbb color"))
+            }),
+        }
+    }
+}
+
 /// Frame styling options, defaults ported from VHS (vhs/style.go
 /// DefaultStyleOptions + vhs/vhs.go DefaultVHSOptions).
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Serde: missing fields take defaults, unknown fields are ignored — a
+/// timeline written by a newer vhs_rs still renders on this one.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct RenderOptions {
     pub width: usize,
     pub height: usize,

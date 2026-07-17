@@ -55,6 +55,7 @@ pub mod evaluator;
 pub mod replay;
 pub mod report;
 pub mod resolve;
+pub mod timeline;
 
 use error::ParseError;
 
