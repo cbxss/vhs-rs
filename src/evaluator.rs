@@ -180,7 +180,9 @@ async fn run_inner(
 
     for (cmd, res) in commands.iter().zip(resolved.iter()) {
         match cmd.command_type {
-            TokenType::Set if !started => apply_setting(&mut settings, cmd, quiet),
+            // Silent here: the command loop re-applies every preamble Set
+            // (idempotently) and owns the one user-facing warning per line.
+            TokenType::Set if !started => apply_setting(&mut settings, cmd, true),
             TokenType::Env if !started => {
                 spawn_env.push((cmd.options.clone(), cmd.args.clone()));
             }
@@ -232,6 +234,10 @@ async fn run_inner(
     let mut env = vec![
         ("TERM".to_string(), "xterm-256color".to_string()),
         ("PS1".to_string(), "> ".to_string()),
+        // Deliberately does NOT match the default WaitPattern (`>$`): bash's
+        // stock PS2 is "> ", so an unclosed quote would otherwise show a
+        // continuation prompt that `Wait` mistakes for "the prompt is back".
+        ("PS2".to_string(), "... ".to_string()),
         ("PROMPT_COMMAND".to_string(), String::new()),
         ("HISTFILE".to_string(), String::new()),
         ("LANG".to_string(), "C.UTF-8".to_string()),
@@ -1013,14 +1019,14 @@ fn apply_setting(settings: &mut Settings, cmd: &Command, quiet: bool) {
     };
     match cmd.options.as_str() {
         "Shell" => settings.shell = v.into(),
-        "FontSize" => set_f32(&mut settings.render.font_size, v),
+        "FontSize" => set_f32(&mut settings.render.font_size, "FontSize", v, &warn),
         "FontFamily" => warn(format!(
             "Set FontFamily {v}: vhs_rs uses the embedded JetBrains Mono; ignored"
         )),
-        "Width" => set_usize(&mut settings.render.width, v),
-        "Height" => set_usize(&mut settings.render.height, v),
-        "Padding" => set_usize(&mut settings.render.padding, v),
-        "Margin" => set_usize(&mut settings.render.margin, v),
+        "Width" => set_usize(&mut settings.render.width, "Width", v, &warn),
+        "Height" => set_usize(&mut settings.render.height, "Height", v, &warn),
+        "Padding" => set_usize(&mut settings.render.padding, "Padding", v, &warn),
+        "Margin" => set_usize(&mut settings.render.margin, "Margin", v, &warn),
         "MarginFill" => {
             if let Some(c) = Rgb::from_hex(v) {
                 settings.render.margin_fill = MarginFill::Color(c);
@@ -1035,10 +1041,20 @@ fn apply_setting(settings: &mut Settings, cmd: &Command, quiet: bool) {
             Err(_) if v.is_empty() => settings.render.window_bar = None,
             Err(e) => warn(e),
         },
-        "WindowBarSize" => set_usize(&mut settings.render.window_bar_size, v),
-        "BorderRadius" => set_usize(&mut settings.render.border_radius, v),
-        "LetterSpacing" => set_f32(&mut settings.render.letter_spacing, v),
-        "LineHeight" => set_f32(&mut settings.render.line_height, v),
+        "WindowBarSize" => set_usize(
+            &mut settings.render.window_bar_size,
+            "WindowBarSize",
+            v,
+            &warn,
+        ),
+        "BorderRadius" => set_usize(&mut settings.render.border_radius, "BorderRadius", v, &warn),
+        "LetterSpacing" => set_f32(
+            &mut settings.render.letter_spacing,
+            "LetterSpacing",
+            v,
+            &warn,
+        ),
+        "LineHeight" => set_f32(&mut settings.render.line_height, "LineHeight", v, &warn),
         "TypingSpeed" => match parse_duration(v) {
             Some(d) => settings.typing_speed = d,
             None => warn(format!("TypingSpeed {v}: not a duration; ignored")),
@@ -1095,19 +1111,23 @@ fn apply_setting(settings: &mut Settings, cmd: &Command, quiet: bool) {
     }
 }
 
-fn set_usize(target: &mut usize, v: &str) {
+fn set_usize(target: &mut usize, name: &str, v: &str, warn: &dyn Fn(String)) {
     if let Ok(n) = v.parse::<f64>()
         && n >= 0.0
     {
         *target = n as usize;
+    } else {
+        warn(format!("{name} {v}: not a non-negative number; ignored"));
     }
 }
 
-fn set_f32(target: &mut f32, v: &str) {
+fn set_f32(target: &mut f32, name: &str, v: &str, warn: &dyn Fn(String)) {
     if let Ok(n) = v.parse::<f32>()
         && n > 0.0
     {
         *target = n;
+    } else {
+        warn(format!("{name} {v}: not a positive number; ignored"));
     }
 }
 

@@ -158,9 +158,10 @@ Details an agent can rely on:
 Two runs of the same tape produce byte-identical `.txt` artifacts — diff them
 and you have a regression test (this repo's own test suite does exactly that,
 see [`tests/golden.rs`](tests/golden.rs)). vhs-rs makes this hold by pinning
-the shell (`bash --noprofile --norc -i`), the prompt (`PS1="> "`, which the
-default `Wait` pattern matches), `TERM`, and the locale, and by waiting for
-the prompt before the first keystroke. It also sets `VHS_RS=1` in the child so
+the shell (`bash --noprofile --norc -i`), the prompts (`PS1="> "`, which the
+default `Wait` pattern matches, and `PS2="... "`, which deliberately doesn't —
+a shell stuck on an unclosed quote times out instead of passing), `TERM`, and
+the locale, and by waiting for the prompt before the first keystroke. It also sets `VHS_RS=1` in the child so
 your scripts can tell they're being recorded.
 
 One caveat: everything else in the environment is inherited. If a command's

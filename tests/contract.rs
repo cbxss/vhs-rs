@@ -369,6 +369,21 @@ fn overflowing_durations_and_counts_are_parse_errors_not_panics() {
 }
 
 #[test]
+fn continuation_prompt_does_not_satisfy_wait() {
+    // An unclosed quote leaves the shell showing its continuation prompt.
+    // Bash's stock PS2 is "> " — which matches the default WaitPattern
+    // (`>$`), so `Wait` would report "prompt is back" while the shell is
+    // actually stuck mid-command. PS2 is pinned to "... " precisely so this
+    // times out (exit 3) instead of false-matching (exit 0).
+    let dir = scratch("ps2-continuation");
+    let out = run_json_in(&dir, "Type \"echo 'oops\"\nEnter\nWait@700ms\n", &[]);
+    let r = report(&out);
+    assert_report_invariants(&r, &out);
+    assert_eq!(r["status"], "wait_timeout", "report: {r}");
+    assert_eq!(r["exit_code"], 3);
+}
+
+#[test]
 fn crlf_tapes_parse_and_run() {
     let dir = scratch("crlf");
     let out = run_json_in(&dir, "Type \"echo crlf\"\r\nEnter\r\nWait\r\n", &[]);
