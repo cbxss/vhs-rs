@@ -75,7 +75,7 @@ pub enum Resolved {
     /// Mid-run path command: Screenshot / Capture.
     PathCommand { path: String },
     /// Commands whose strings are used verbatim or not at all at execution
-    /// time (chords, Set, Env, Hide/Show, Paste, ...).
+    /// time (chords, Set, Env, Hide/Show, Paste, Screen, ...).
     Passthrough,
 }
 
@@ -248,6 +248,7 @@ mod tests {
             ("Ctrl+C", "Passthrough"),
             ("Alt+x", "Passthrough"),
             ("Paste", "Passthrough"),
+            ("Screen", "Passthrough"),
             (r#"Require bash"#, "Passthrough"),
             ("Set TypingSpeed 10ms", "Passthrough"),
         ];

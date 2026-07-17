@@ -51,9 +51,13 @@ pub mod encode {
 
 pub mod artifacts;
 pub mod cli;
+pub mod cmd_render;
 pub mod evaluator;
+pub mod repl;
+pub mod replay;
 pub mod report;
 pub mod resolve;
+pub mod timeline;
 
 use error::ParseError;
 

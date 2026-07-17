@@ -8,16 +8,18 @@
 
 use crate::artifacts::ArtifactRegistry;
 use crate::command::Command;
-use crate::encode::{cast, gif, png, txt};
+use crate::encode::{cast, png, txt};
 use crate::error::ExitKind;
 use crate::keys;
 use crate::render::{BarStyle, MarginFill, RenderOptions, Renderer};
+use crate::replay::{self, ReplaySpec};
 use crate::report::{ArtifactKind, CommandStatus, ReportBuilder};
 use crate::resolve::{Resolved, Scope, resolve_commands};
 use crate::session::Session;
 use crate::snapshot::{SessionEvent, SessionEventKind};
 use crate::term::Term;
 use crate::theme::{self, Rgb, Theme};
+use crate::timeline::{CommandMarker, TIMELINE_VERSION, TimelineHeader, TimelineWriter};
 use crate::token::TokenType;
 use crate::util::parse_duration;
 use regex::Regex;
@@ -27,18 +29,12 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tokio::signal::unix::{SignalKind, signal};
 
-/// Half-period of the synthesized cursor blink (xterm-ish cadence).
-const BLINK_HALF_PERIOD: Duration = Duration::from_millis(530);
-/// Idle gaps longer than this get no synthesized blink frames (degenerate
-/// tapes would otherwise balloon the GIF).
-const BLINK_MAX_GAP: Duration = Duration::from_secs(30);
-
 /// Everything `Set` can configure, with VHS defaults.
-struct Settings {
-    shell: String,
+pub(crate) struct Settings {
+    pub(crate) shell: String,
     typing_speed: Duration,
-    wait_timeout: Duration,
-    wait_pattern: Regex,
+    pub(crate) wait_timeout: Duration,
+    pub(crate) wait_pattern: Regex,
     playback_speed: f64,
     max_fps: f64,
     cursor_blink: bool,
@@ -67,17 +63,41 @@ impl Default for Settings {
 /// Outcome of a single failed step, mapped to the exit taxonomy. The report
 /// `reason` derives from `exit` ([`ExitKind::reason`]) unless `reason`
 /// overrides it with a more specific taxonomy entry (e.g. `child_exited`).
-struct StepFailure {
-    exit: ExitKind,
-    reason: Option<&'static str>,
-    message: String,
-    detail: Option<serde_json::Value>,
+pub(crate) struct StepFailure {
+    pub(crate) exit: ExitKind,
+    pub(crate) reason: Option<&'static str>,
+    pub(crate) message: String,
+    pub(crate) detail: Option<serde_json::Value>,
+}
+
+impl StepFailure {
+    pub(crate) fn new(
+        exit: ExitKind,
+        reason: Option<&'static str>,
+        message: impl Into<String>,
+        detail: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            exit,
+            reason,
+            message: message.into(),
+            detail,
+        }
+    }
+
+    pub(crate) fn runtime(message: impl Into<String>) -> Self {
+        Self::new(ExitKind::Runtime, None, message, None)
+    }
+
+    pub(crate) fn runtime_reason(reason: &'static str, message: impl Into<String>) -> Self {
+        Self::new(ExitKind::Runtime, Some(reason), message, None)
+    }
 }
 
 /// What ended a [`wait_for`]: the pattern matched, the deadline passed, or
 /// the child exited (and the pattern can never match).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WaitOutcome {
+pub(crate) enum WaitOutcome {
     Matched,
     TimedOut,
     ChildExited,
@@ -90,14 +110,17 @@ enum RunOutcome {
 }
 
 /// Entry point called by the CLI after parse+validate succeeded. `timeout`
-/// is the whole-run wall-clock budget (`--timeout`); on SIGINT/SIGTERM the
-/// report is still finalized and printed before exiting.
+/// is the whole-run wall-clock budget (`--timeout`); `record` is the
+/// `--record` timeline path (in addition to any `Output x.jsonl` targets).
+/// On SIGINT/SIGTERM the report is still finalized and printed before
+/// exiting.
 pub fn run(
     tape_name: &str,
     commands: &[Command],
     json: bool,
     quiet: bool,
     timeout: Option<Duration>,
+    record: Option<&str>,
 ) -> i32 {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -113,7 +136,7 @@ pub fn run(
     let mut report = ReportBuilder::new(tape_name);
     let outcome = rt.block_on(async {
         let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
-        let fut = run_inner(tape_name, commands, &mut report, quiet, deadline);
+        let fut = run_inner(tape_name, commands, &mut report, quiet, deadline, record);
         let (Ok(mut sigterm), Ok(mut sigint)) = (
             signal(SignalKind::terminate()),
             signal(SignalKind::interrupt()),
@@ -160,6 +183,7 @@ async fn run_inner(
     report: &mut ReportBuilder,
     quiet: bool,
     deadline: Option<tokio::time::Instant>,
+    record: Option<&str>,
 ) -> ExitKind {
     // ---- Typed resolution side table: everything the parser already
     // validated (durations, counts, Wait/Assert scopes and regexes) lifted
@@ -213,73 +237,21 @@ async fn run_inner(
         }
     }
 
-    let initial_theme = settings.theme.clone();
-
-    // ---- Renderer + geometry (cols/rows derive from font metrics).
-    let mut renderer = Renderer::new(settings.render.clone(), settings.theme.clone());
-    let (cols, rows) = renderer.term_size();
-    if cols < 10 || rows < 2 {
-        report.set_failure(
-            None,
-            ExitKind::Runtime.reason(),
-            format!(
-                "terminal too small: {cols}x{rows} cells (check Width/Height/Padding/FontSize)"
-            ),
-        );
-        return ExitKind::Runtime;
-    }
-
-    // ---- Spawn the session with a pinned, deterministic environment.
-    let argv = shell_argv(&settings.shell);
-    // C.UTF-8 is a glibc/musl locale; macOS doesn't ship it, and a locale
-    // that fails to resolve falls back to plain C — readline then mangles
-    // multibyte input, which surfaced as golden-tape timeouts on macOS CI.
-    let locale = if cfg!(target_os = "macos") {
-        "en_US.UTF-8"
-    } else {
-        "C.UTF-8"
+    let spec = EngineSpec {
+        tape_name,
+        settings,
+        spawn_env,
+        outputs: &outputs,
+        record,
+        quiet,
     };
-    let mut env = vec![
-        ("TERM".to_string(), "xterm-256color".to_string()),
-        ("PS1".to_string(), "> ".to_string()),
-        // Deliberately does NOT match the default WaitPattern (`>$`): bash's
-        // stock PS2 is "> ", so an unclosed quote would otherwise show a
-        // continuation prompt that `Wait` mistakes for "the prompt is back".
-        ("PS2".to_string(), "... ".to_string()),
-        ("PROMPT_COMMAND".to_string(), String::new()),
-        ("HISTFILE".to_string(), String::new()),
-        ("LANG".to_string(), locale.to_string()),
-        ("LC_ALL".to_string(), locale.to_string()),
-        // macOS bash 3.2 otherwise opens every interactive session with the
-        // "default shell is now zsh" banner, polluting the screen.
-        (
-            "BASH_SILENCE_DEPRECATION_WARNING".to_string(),
-            "1".to_string(),
-        ),
-        ("VHS_RS".to_string(), "1".to_string()),
-    ];
-    env.extend(spawn_env);
-
-    let mut session = match Session::spawn(&argv, &env, cols, rows) {
-        Ok(s) => s,
-        Err(e) => {
-            report.set_failure(
-                None,
-                ExitKind::Runtime.reason(),
-                format!("failed to spawn {argv:?}: {e}"),
-            );
+    let mut engine = match Engine::spawn(spec, report) {
+        Ok(engine) => engine,
+        Err(msg) => {
+            report.set_failure(None, ExitKind::Runtime.reason(), msg);
             return ExitKind::Runtime;
         }
     };
-    report.set_term(cols, rows, settings.shell.clone());
-
-    // Golden writer for `Output .txt/.ascii/.test` (records after every command).
-    let mut golden = txt::GoldenWriter::new();
-
-    // One owner for artifact bookkeeping: planned golden targets, written
-    // artifacts (drained into the report at the end), collision warnings,
-    // and forensics naming.
-    let mut registry = ArtifactRegistry::new(&outputs, tape_name, quiet);
 
     // Implicit initial wait for the prompt — removes the classic race where
     // typing starts before the shell is up. A missing prompt is a warning
@@ -287,16 +259,7 @@ async fn run_inner(
     // exited can never run anything: without this check a typo'd
     // `Set Shell` would sail through to a false success, because writes
     // into a dead PTY still land in the kernel buffer.
-    let initial_wait = with_deadline(
-        deadline,
-        wait_for(
-            &mut session,
-            Scope::Line,
-            &settings.wait_pattern.clone(),
-            settings.wait_timeout,
-        ),
-    )
-    .await;
+    let initial_wait = with_deadline(deadline, engine.initial_prompt_wait()).await;
     match initial_wait {
         None => {
             report.set_failure(
@@ -310,53 +273,39 @@ async fn run_inner(
             report.set_failure(
                 None,
                 "child_exited",
-                format!("shell {argv:?} exited before the tape started (bad Set Shell?)"),
+                format!(
+                    "shell {:?} exited before the tape started (bad Set Shell?)",
+                    engine.argv
+                ),
             );
             return ExitKind::Runtime;
         }
         Some(Ok(WaitOutcome::TimedOut)) | Some(Err(_)) if !quiet => {
             eprintln!(
                 "vhs-rs: warning: prompt did not match /{}/ within {:?}; continuing",
-                settings.wait_pattern.as_str(),
-                settings.wait_timeout
+                engine.settings.wait_pattern.as_str(),
+                engine.settings.wait_timeout
             );
         }
         _ => {}
     }
 
     // ---- Command loop.
-    let mut clipboard = String::new();
-    let mut theme_timeline: Vec<(Duration, Theme)> = Vec::new();
     let mut exit = ExitKind::Success;
 
     for (index, (cmd, res)) in commands.iter().zip(resolved.iter()).enumerate() {
         let step_start = Instant::now();
-        let result = with_deadline(
-            deadline,
-            execute(
-                cmd,
-                res,
-                &mut session,
-                &mut settings,
-                &mut renderer,
-                &mut clipboard,
-                &mut theme_timeline,
-                &mut registry,
-                index,
-                quiet,
-            ),
-        )
-        .await
-        .unwrap_or_else(|| {
-            Err(StepFailure {
-                exit: ExitKind::Runtime,
-                reason: Some("run_timeout"),
-                message: "--timeout exceeded; aborting the run".to_string(),
-                detail: None,
-            })
-        });
+        let result = with_deadline(deadline, engine.exec(index, cmd, res))
+            .await
+            .unwrap_or_else(|| {
+                Err(StepFailure::runtime_reason(
+                    "run_timeout",
+                    "--timeout exceeded; aborting the run",
+                ))
+            });
 
         let elapsed = step_start.elapsed();
+        engine.record_marker(index, cmd, result.is_ok(), elapsed);
         match result {
             Ok(detail) => {
                 report.record(index, cmd, CommandStatus::Ok, elapsed, detail);
@@ -380,98 +329,523 @@ async fn run_inner(
             }
         }
 
-        if registry.has_golden_targets() {
-            // Byte-identical goldens must not depend on whether a keystroke's
-            // echo landed inside the typing-speed settle window — on a loaded
-            // machine (CI) it regularly misses. Wait for the PTY to go
-            // briefly quiet before recording the frame.
-            quiesce(
-                &mut session,
-                Duration::from_millis(25),
-                Duration::from_millis(250),
-            )
-            .await;
-            golden.record(&session.term().text());
-        }
+        engine.record_golden_frame().await;
     }
 
     // ---- Failure forensics: dump exactly what the terminal showed.
     if exit != ExitKind::Success {
-        let _ = session.drain();
-        let (text_path, png_path) = registry.forensics_paths();
-        if txt::write_capture(&text_path, &session.term().text()).is_ok() {
-            registry.record(text_path.to_string_lossy(), ArtifactKind::FailureText, None);
+        engine.write_forensics();
+    }
+
+    engine.finish(&outputs, report, &mut exit).await;
+    exit
+}
+
+/// The live execution state for one spawned session: everything a tape
+/// command can touch, shared between the batch evaluator and the repl. The
+/// batch pre-pass (settings/Env/Require before spawn) stays with the
+/// callers; the Engine takes over once the terminal exists.
+pub(crate) struct Engine {
+    session: Session,
+    settings: Settings,
+    renderer: Renderer,
+    /// Theme at spawn time (GIF replays start here).
+    initial_theme: Theme,
+    argv: Vec<String>,
+    cols: usize,
+    rows: usize,
+    clipboard: String,
+    theme_timeline: Vec<(Duration, Theme)>,
+    registry: ArtifactRegistry,
+    golden: txt::GoldenWriter,
+    recorder: Recorder,
+    quiet: bool,
+}
+
+pub(crate) struct EngineSpec<'a> {
+    pub(crate) tape_name: &'a str,
+    pub(crate) settings: Settings,
+    pub(crate) spawn_env: Vec<(String, String)>,
+    pub(crate) outputs: &'a [(String, String)],
+    pub(crate) record: Option<&'a str>,
+    pub(crate) quiet: bool,
+}
+
+impl Engine {
+    /// Builds the renderer, spawns the shell on a pinned deterministic
+    /// environment, and opens the artifact/recording machinery. Sets the
+    /// report's term info as soon as the terminal exists. `Err` carries the
+    /// user-facing failure message (the caller maps it to `runtime_error`).
+    pub(crate) fn spawn(spec: EngineSpec<'_>, report: &mut ReportBuilder) -> Result<Self, String> {
+        let EngineSpec {
+            tape_name,
+            settings,
+            spawn_env,
+            outputs,
+            record,
+            quiet,
+        } = spec;
+        let initial_theme = settings.theme.clone();
+
+        // ---- Renderer + geometry (cols/rows derive from font metrics).
+        let renderer = Renderer::new(settings.render.clone(), settings.theme.clone());
+        let (cols, rows) = renderer.term_size();
+        if cols < 10 || rows < 2 {
+            return Err(format!(
+                "terminal too small: {cols}x{rows} cells (check Width/Height/Padding/FontSize)"
+            ));
         }
-        let canvas = renderer.render(&session.term().snapshot());
+
+        // ---- Spawn the session with a pinned, deterministic environment.
+        let argv = shell_argv(&settings.shell);
+        // C.UTF-8 is a glibc/musl locale; macOS doesn't ship it, and a locale
+        // that fails to resolve falls back to plain C — readline then mangles
+        // multibyte input, which surfaced as golden-tape timeouts on macOS CI.
+        let locale = if cfg!(target_os = "macos") {
+            "en_US.UTF-8"
+        } else {
+            "C.UTF-8"
+        };
+        let mut env = vec![
+            ("TERM".to_string(), "xterm-256color".to_string()),
+            ("PS1".to_string(), "> ".to_string()),
+            // Deliberately does NOT match the default WaitPattern (`>$`):
+            // bash's stock PS2 is "> ", so an unclosed quote would otherwise
+            // show a continuation prompt that `Wait` mistakes for "the
+            // prompt is back".
+            ("PS2".to_string(), "... ".to_string()),
+            ("PROMPT_COMMAND".to_string(), String::new()),
+            ("HISTFILE".to_string(), String::new()),
+            ("LANG".to_string(), locale.to_string()),
+            ("LC_ALL".to_string(), locale.to_string()),
+            // macOS bash 3.2 otherwise opens every interactive session with
+            // the "default shell is now zsh" banner, polluting the screen.
+            (
+                "BASH_SILENCE_DEPRECATION_WARNING".to_string(),
+                "1".to_string(),
+            ),
+            ("VHS_RS".to_string(), "1".to_string()),
+        ];
+        env.extend(spawn_env);
+
+        let session = Session::spawn(&argv, &env, cols, rows)
+            .map_err(|e| format!("failed to spawn {argv:?}: {e}"))?;
+        report.set_term(cols, rows, settings.shell.clone());
+
+        // One owner for artifact bookkeeping: planned golden targets,
+        // written artifacts (drained into the report at the end), collision
+        // warnings, and forensics naming.
+        let registry = ArtifactRegistry::new(outputs, tape_name, quiet);
+
+        // Streaming timeline recorders: every `Output x.jsonl` target plus
+        // `--record`. Created (header written) before anything runs, so even
+        // a killed run leaves a renderable file. Note the header carries the
+        // preamble settings; a mid-tape `Set PlaybackSpeed` affects this
+        // run's own GIF but not a later `render` of the recording.
+        let jsonl_targets: Vec<String> = outputs
+            .iter()
+            .filter(|(ext, _)| ext == ".jsonl")
+            .map(|(_, path)| path.clone())
+            .chain(record.map(String::from))
+            .collect();
+        let header = timeline_header(tape_name, &settings, &initial_theme, cols, rows);
+        let recorder = Recorder::create(&jsonl_targets, &header)
+            .map_err(|(path, e)| format!("failed to create timeline {path}: {e}"))?;
+
+        Ok(Self {
+            session,
+            settings,
+            renderer,
+            initial_theme,
+            argv,
+            cols,
+            rows,
+            clipboard: String::new(),
+            theme_timeline: Vec::new(),
+            // Golden writer for `Output .txt/.ascii/.test` (records after
+            // every command).
+            golden: txt::GoldenWriter::new(),
+            registry,
+            recorder,
+            quiet,
+        })
+    }
+
+    /// The implicit wait for the shell prompt before the first keystroke.
+    pub(crate) async fn initial_prompt_wait(&mut self) -> std::io::Result<WaitOutcome> {
+        let pattern = self.settings.wait_pattern.clone();
+        wait_for(
+            &mut self.session,
+            Scope::Line,
+            &pattern,
+            self.settings.wait_timeout,
+        )
+        .await
+    }
+
+    /// Executes one command against the live session.
+    pub(crate) async fn exec(
+        &mut self,
+        index: usize,
+        cmd: &Command,
+        res: &Resolved,
+    ) -> Result<Option<serde_json::Value>, StepFailure> {
+        execute(
+            cmd,
+            res,
+            &mut self.session,
+            &mut self.settings,
+            &mut self.renderer,
+            &mut self.clipboard,
+            &mut self.theme_timeline,
+            &mut self.registry,
+            index,
+            self.quiet,
+        )
+        .await
+    }
+
+    /// Streams the just-finished command (events, theme changes, boundary
+    /// marker) to the timeline recorders, when any are active.
+    pub(crate) fn record_marker(
+        &mut self,
+        index: usize,
+        cmd: &Command,
+        ok: bool,
+        elapsed: Duration,
+    ) {
+        if !self.recorder.active() {
+            return;
+        }
+        let marker = CommandMarker {
+            index,
+            line: cmd.token.line,
+            command: cmd.to_string(),
+            status: if ok { "ok" } else { "failed" }.into(),
+            elapsed_ms: elapsed.as_millis() as u64,
+        };
+        self.recorder
+            .observe(&self.session, &self.theme_timeline, &marker);
+    }
+
+    /// Appends the post-command golden frame, when golden targets exist.
+    pub(crate) async fn record_golden_frame(&mut self) {
+        if !self.registry.has_golden_targets() {
+            return;
+        }
+        // Byte-identical goldens must not depend on whether a keystroke's
+        // echo landed inside the typing-speed settle window — on a loaded
+        // machine (CI) it regularly misses. Wait for the PTY to go briefly
+        // quiet before recording the frame.
+        quiesce(
+            &mut self.session,
+            Duration::from_millis(25),
+            Duration::from_millis(250),
+        )
+        .await;
+        self.golden.record(&self.session.term().text());
+    }
+
+    /// Failure forensics: dump exactly what the terminal showed.
+    pub(crate) fn write_forensics(&mut self) {
+        let _ = self.session.drain();
+        let (text_path, png_path) = self.registry.forensics_paths();
+        if txt::write_capture(&text_path, &self.session.term().text()).is_ok() {
+            self.registry
+                .record(text_path.to_string_lossy(), ArtifactKind::FailureText, None);
+        }
+        let canvas = self.renderer.render(&self.session.term().snapshot());
         if png::write_png(&png_path, canvas).is_ok() {
-            registry.record(png_path.to_string_lossy(), ArtifactKind::FailurePng, None);
+            self.registry
+                .record(png_path.to_string_lossy(), ArtifactKind::FailurePng, None);
         }
     }
 
-    // ---- Teardown before encoding (frees the child; events are all captured).
-    let _ = session.shutdown().await;
+    /// Teardown and end-of-run outputs: kills the child, flushes the
+    /// recorders, encodes every `Output` target, and drains the artifact
+    /// list into the report. Encode errors are real failures (unlike VHS):
+    /// they set the report failure and flip `exit` to runtime.
+    pub(crate) async fn finish(
+        mut self,
+        outputs: &[(String, String)],
+        report: &mut ReportBuilder,
+        exit: &mut ExitKind,
+    ) {
+        // ---- Teardown before encoding (frees the child; events are all
+        // captured).
+        let _ = self.session.shutdown().await;
+        // The shutdown drain + Exit event are the timeline's final lines.
+        self.recorder.sync_events(&self.session);
 
-    // ---- End-of-run outputs. Encode errors are real failures (unlike VHS).
-    for (ext, path) in &outputs {
-        let result = match ext.as_str() {
-            ".txt" | ".ascii" | ".test" => {
-                golden.save(Path::new(path)).map(|_| ArtifactKind::Golden)
-            }
-            ".png" => {
-                let canvas = renderer.render(&session.term().snapshot());
-                png::write_png(Path::new(path), canvas).map(|_| ArtifactKind::Png)
-            }
-            ".gif" => encode_gif(
-                path,
-                &settings,
-                &mut renderer,
-                session.events(),
-                (cols, rows),
-                initial_theme.clone(),
-                &theme_timeline,
-            )
-            .map(|_| ArtifactKind::Gif),
-            ".cast" => cast::write_cast(
-                Path::new(path),
-                &cast::CastMeta {
-                    cols,
-                    rows,
-                    command: Some(settings.shell.clone()),
-                    title: None,
-                    env: vec![("TERM".into(), "xterm-256color".into())],
-                },
-                session.events(),
-            )
-            .map(|_| ArtifactKind::Cast),
-            other => {
-                // validate() should have caught this; belt and braces.
-                report.set_failure(
-                    None,
-                    ExitKind::Runtime.reason(),
-                    format!("unsupported output {other}"),
-                );
-                exit = ExitKind::Runtime;
-                continue;
-            }
-        };
+        for (ext, path) in outputs {
+            let result = match ext.as_str() {
+                // Already streamed while the run happened; the recorder
+                // records the artifact (and any write failure) below.
+                ".jsonl" => continue,
+                ".txt" | ".ascii" | ".test" => self
+                    .golden
+                    .save(Path::new(path))
+                    .map(|_| ArtifactKind::Golden),
+                ".png" => {
+                    let canvas = self.renderer.render(&self.session.term().snapshot());
+                    png::write_png(Path::new(path), canvas).map(|_| ArtifactKind::Png)
+                }
+                ".gif" => {
+                    let spec = ReplaySpec {
+                        max_fps: self.settings.max_fps,
+                        playback_speed: self.settings.playback_speed,
+                        loop_offset: self.settings.loop_offset,
+                        cursor_blink: self.settings.cursor_blink,
+                        initial_theme: self.initial_theme.clone(),
+                        theme_timeline: self.theme_timeline.clone(),
+                    };
+                    // Hide→Show wall time is cut, not frozen: without this
+                    // the pre-Hide frame inherits the whole hidden span as
+                    // its delay (VHS cuts hidden sections; so do we).
+                    let events = crate::timeline::collapse_hidden(self.session.events());
+                    let result = replay::encode_gif(
+                        Path::new(path),
+                        &spec,
+                        &mut self.renderer,
+                        &events,
+                        (self.cols, self.rows),
+                    );
+                    // The replay leaves the renderer on the timeline's last
+                    // theme; later renders (Output .png, forensics) must use
+                    // the run's final theme.
+                    self.renderer.set_theme(self.settings.theme.clone());
+                    result.map(|_| ArtifactKind::Gif)
+                }
+                ".cast" => cast::write_cast(
+                    Path::new(path),
+                    &cast::CastMeta {
+                        cols: self.cols,
+                        rows: self.rows,
+                        command: Some(self.settings.shell.clone()),
+                        title: None,
+                        env: vec![("TERM".into(), "xterm-256color".into())],
+                    },
+                    self.session.events(),
+                )
+                .map(|_| ArtifactKind::Cast),
+                other => {
+                    // validate() should have caught this; belt and braces.
+                    report.set_failure(
+                        None,
+                        ExitKind::Runtime.reason(),
+                        format!("unsupported output {other}"),
+                    );
+                    *exit = ExitKind::Runtime;
+                    continue;
+                }
+            };
 
-        match result {
-            Ok(kind) => registry.record(path.clone(), kind, None),
-            Err(e) => {
-                report.set_failure(
-                    None,
-                    ExitKind::Runtime.reason(),
-                    format!("failed to write {path}: {e}"),
-                );
-                if exit == ExitKind::Success {
-                    exit = ExitKind::Runtime;
+            match result {
+                Ok(kind) => self.registry.record(path.clone(), kind, None),
+                Err(e) => {
+                    report.set_failure(
+                        None,
+                        ExitKind::Runtime.reason(),
+                        format!("failed to write {path}: {e}"),
+                    );
+                    if *exit == ExitKind::Success {
+                        *exit = ExitKind::Runtime;
+                    }
+                }
+            }
+        }
+
+        self.recorder.finish(&mut self.registry, report, exit);
+        self.registry.drain_into(report);
+    }
+
+    pub(crate) fn argv(&self) -> &[String] {
+        &self.argv
+    }
+
+    pub(crate) fn term_info(&self) -> (usize, usize, String) {
+        (self.cols, self.rows, self.settings.shell.clone())
+    }
+
+    pub(crate) fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    pub(crate) fn exited(&self) -> bool {
+        self.session.exited()
+    }
+
+    pub(crate) fn drain(&mut self) -> std::io::Result<bool> {
+        let changed = self.session.drain()?;
+        if changed {
+            self.recorder.sync_events(&self.session);
+        }
+        Ok(changed)
+    }
+
+    pub(crate) async fn wait_change(&mut self, deadline: Duration) -> std::io::Result<bool> {
+        let changed = self.session.wait_change(deadline).await?;
+        if changed {
+            let _ = self.session.drain()?;
+            self.recorder.sync_events(&self.session);
+        }
+        Ok(changed)
+    }
+
+    pub(crate) fn add_timeline_output(
+        &mut self,
+        tape_name: &str,
+        path: &str,
+    ) -> Result<(), String> {
+        let header = timeline_header(
+            tape_name,
+            &self.settings,
+            &self.initial_theme,
+            self.cols,
+            self.rows,
+        );
+        self.recorder
+            .add(
+                path.to_string(),
+                &header,
+                &self.session,
+                &self.theme_timeline,
+            )
+            .map_err(|e| format!("failed to create timeline {path}: {e}"))
+    }
+}
+
+fn timeline_header(
+    tape_name: &str,
+    settings: &Settings,
+    initial_theme: &Theme,
+    cols: usize,
+    rows: usize,
+) -> TimelineHeader {
+    TimelineHeader {
+        version: TIMELINE_VERSION,
+        cols,
+        rows,
+        shell: settings.shell.clone(),
+        tape: Some(tape_name.to_string()),
+        theme: initial_theme.clone(),
+        render: settings.render.clone(),
+        cursor_blink: settings.cursor_blink,
+        max_fps: settings.max_fps,
+        playback_speed: settings.playback_speed,
+        loop_offset: settings.loop_offset,
+    }
+}
+
+/// The set of live timeline writers for one run (`Output x.jsonl` targets +
+/// `--record`), with per-writer failure isolation: a writer that errors
+/// mid-run stops receiving events and surfaces as a failed artifact at the
+/// end, without aborting the run or the other writers.
+struct Recorder {
+    writers: Vec<(String, TimelineWriter)>,
+    failed: Vec<(String, std::io::Error)>,
+    themes_written: usize,
+}
+
+impl Recorder {
+    /// Opens a writer (and writes the header) for every path. Creation
+    /// failure is fatal — a run that can't produce a requested artifact
+    /// should not start.
+    fn create(paths: &[String], header: &TimelineHeader) -> Result<Self, (String, std::io::Error)> {
+        let mut writers = Vec::with_capacity(paths.len());
+        for path in paths {
+            match TimelineWriter::create(Path::new(path), header) {
+                Ok(w) => writers.push((path.clone(), w)),
+                Err(e) => return Err((path.clone(), e)),
+            }
+        }
+        Ok(Self {
+            writers,
+            failed: Vec::new(),
+            themes_written: 0,
+        })
+    }
+
+    fn active(&self) -> bool {
+        !self.writers.is_empty()
+    }
+
+    fn add(
+        &mut self,
+        path: String,
+        header: &TimelineHeader,
+        session: &Session,
+        theme_timeline: &[(Duration, Theme)],
+    ) -> std::io::Result<()> {
+        let mut writer = TimelineWriter::create(Path::new(&path), header)?;
+        writer.sync(session.events())?;
+        for (time, theme) in theme_timeline {
+            writer.write_theme(*time, theme)?;
+        }
+        self.writers.push((path, writer));
+        Ok(())
+    }
+
+    /// Streams everything new since the last call: session events, theme
+    /// changes, and the just-finished command's marker.
+    fn observe(
+        &mut self,
+        session: &Session,
+        theme_timeline: &[(Duration, Theme)],
+        marker: &CommandMarker,
+    ) {
+        self.each(|w| w.sync(session.events()));
+        while self.themes_written < theme_timeline.len() {
+            let (time, theme) = &theme_timeline[self.themes_written];
+            let (time, theme) = (*time, theme.clone());
+            self.each(|w| w.write_theme(time, &theme));
+            self.themes_written += 1;
+        }
+        let time = session.elapsed();
+        self.each(|w| w.write_command(time, marker));
+    }
+
+    /// Streams any not-yet-written session events (the teardown tail).
+    fn sync_events(&mut self, session: &Session) {
+        self.each(|w| w.sync(session.events()));
+    }
+
+    /// Records surviving writers as artifacts and failed ones as run
+    /// failures (runtime exit, first failure message wins in the report).
+    fn finish(
+        self,
+        registry: &mut ArtifactRegistry,
+        report: &mut ReportBuilder,
+        exit: &mut ExitKind,
+    ) {
+        for (path, _) in self.writers {
+            registry.record(path, ArtifactKind::Timeline, None);
+        }
+        for (path, e) in self.failed {
+            report.set_failure(
+                None,
+                ExitKind::Runtime.reason(),
+                format!("failed to write {path}: {e}"),
+            );
+            if *exit == ExitKind::Success {
+                *exit = ExitKind::Runtime;
+            }
+        }
+    }
+
+    /// Applies `f` to every live writer, retiring writers that fail.
+    fn each(&mut self, mut f: impl FnMut(&mut TimelineWriter) -> std::io::Result<()>) {
+        let mut i = 0;
+        while i < self.writers.len() {
+            match f(&mut self.writers[i].1) {
+                Ok(()) => i += 1,
+                Err(e) => {
+                    let (path, _) = self.writers.remove(i);
+                    self.failed.push((path, e));
                 }
             }
         }
     }
-
-    registry.drain_into(report);
-    exit
 }
 
 /// Executes one command from its typed resolution (`res` carries everything
@@ -725,6 +1099,11 @@ async fn execute(
             Ok(Some(serde_json::json!({"path": path})))
         }
 
+        Screen => {
+            let _ = session.drain();
+            Ok(Some(screen_detail(session.term())))
+        }
+
         Hide => {
             session.note_visibility(false);
             Ok(None)
@@ -766,6 +1145,18 @@ async fn execute(
 
 // ---- Wait/Assert machinery --------------------------------------------------
 
+fn screen_detail(term: &Term) -> serde_json::Value {
+    let cursor = term.cursor();
+    serde_json::json!({
+        "screen_text": term.text(),
+        "cursor": {
+            "col": cursor.col,
+            "row": cursor.row,
+            "visible": cursor.visible,
+        },
+    })
+}
+
 /// Report detail for a successful Wait/Assert match (`elapsed` only for Wait).
 fn match_detail(scope: Scope, regex: &Regex, elapsed: Option<Duration>) -> serde_json::Value {
     let mut detail = serde_json::json!({
@@ -796,12 +1187,7 @@ fn match_failure(
     if scope == Scope::Line {
         detail["line_text"] = term.current_line().into();
     }
-    StepFailure {
-        exit,
-        reason,
-        message,
-        detail: Some(detail),
-    }
+    StepFailure::new(exit, reason, message, Some(detail))
 }
 
 /// Event-driven wait: check, then await the next output chunk, re-check.
@@ -883,153 +1269,6 @@ async fn settle(session: &mut Session, d: Duration) {
     }
 }
 
-// ---- GIF replay ---------------------------------------------------------------
-
-/// Replays the event log through a fresh emulator, rendering each visible
-/// state change into the styled frame and streaming it to the encoder.
-#[allow(clippy::too_many_arguments)]
-fn encode_gif(
-    path: &str,
-    settings: &Settings,
-    renderer: &mut Renderer,
-    events: &[SessionEvent],
-    size: (usize, usize),
-    initial_theme: Theme,
-    theme_timeline: &[(Duration, Theme)],
-) -> std::io::Result<()> {
-    let (cols, rows) = size;
-    let opts = renderer.options().clone();
-    let mut term = Term::new(cols, rows);
-    let mut enc = gif::GifEncoder::create(
-        Path::new(path),
-        gif::GifOptions {
-            max_fps: settings.max_fps,
-            playback_speed: settings.playback_speed,
-            ..gif::GifOptions::new(opts.width as u16, opts.height as u16)
-        },
-    )?;
-    if let Some(p) = settings.loop_offset {
-        enc.set_loop_offset(p);
-    }
-
-    // Start from the tape's initial theme; apply mid-tape changes at their time.
-    renderer.set_theme(initial_theme);
-    let mut theme_idx = 0;
-    let mut visible = true;
-    let blink = settings.cursor_blink;
-    // Double-buffered snapshots: `last_snap` is the grid of the last pushed
-    // frame (valid while `last_time` is `Some`; blink frames synthesize from
-    // it), `scratch` receives the next snapshot, and the two swap after each
-    // push — so per-event snapshotting allocates nothing at steady state.
-    let empty_snap = || crate::snapshot::GridSnapshot {
-        cols: 0,
-        rows: 0,
-        cells: Vec::new(),
-        cursor: crate::snapshot::Cursor {
-            col: 0,
-            row: 0,
-            visible: false,
-        },
-    };
-    let mut last_snap = empty_snap();
-    let mut scratch = empty_snap();
-    let mut last_time: Option<Duration> = None;
-
-    // Renders idle-gap blink toggles between the last frame and `until`.
-    let synth = |renderer: &mut Renderer,
-                 enc: &mut gif::GifEncoder,
-                 last: Option<Duration>,
-                 snap: &crate::snapshot::GridSnapshot,
-                 until: Duration|
-     -> std::io::Result<()> {
-        let Some(since) = last else {
-            return Ok(());
-        };
-        if !snap.cursor.visible || until.saturating_sub(since) > BLINK_MAX_GAP {
-            return Ok(());
-        }
-        for (t, on) in blink_frames(since, until, BLINK_HALF_PERIOD) {
-            let canvas = renderer.render_frame(snap, on);
-            enc.push_frame(t, &canvas.buf)?;
-        }
-        Ok(())
-    };
-
-    let mut end_time = Duration::ZERO;
-    for ev in events {
-        while theme_idx < theme_timeline.len() && theme_timeline[theme_idx].0 <= ev.time {
-            renderer.set_theme(theme_timeline[theme_idx].1.clone());
-            theme_idx += 1;
-        }
-        end_time = end_time.max(ev.time);
-        match &ev.kind {
-            SessionEventKind::Output(s) => {
-                if visible && blink {
-                    synth(renderer, &mut enc, last_time, &last_snap, ev.time)?;
-                }
-                term.feed(s);
-                if visible {
-                    term.snapshot_into(&mut scratch);
-                    let cursor_on = !blink || blink_phase_on(ev.time, BLINK_HALF_PERIOD);
-                    let canvas = renderer.render_frame(&scratch, cursor_on);
-                    enc.push_frame(ev.time, &canvas.buf)?;
-                    std::mem::swap(&mut last_snap, &mut scratch);
-                    last_time = Some(ev.time);
-                }
-            }
-            SessionEventKind::Resize(c, r) => {
-                term.resize(*c, *r);
-                last_time = None; // stale grid; don't synthesize from it
-            }
-            SessionEventKind::Visibility(v) => visible = *v,
-            SessionEventKind::Exit => {
-                // Blink through the trailing idle gap before the child exits.
-                if visible && blink {
-                    synth(renderer, &mut enc, last_time, &last_snap, ev.time)?;
-                }
-                break;
-            }
-        }
-    }
-
-    // The held final frame must end cursor-visible: re-push the last grid
-    // with the cursor on (coalesces if the pending frame already shows it).
-    if blink && last_time.is_some() {
-        let canvas = renderer.render_frame(&last_snap, true);
-        enc.push_frame(end_time, &canvas.buf)?;
-    }
-
-    // Restore the final theme for any later renders (Output .png, forensics).
-    renderer.set_theme(settings.theme.clone());
-    enc.finish()?;
-    Ok(())
-}
-
-/// Blink phase at absolute session time `t`: `true` = cursor shown.
-fn blink_phase_on(t: Duration, half_period: Duration) -> bool {
-    (t.as_millis() / half_period.as_millis()).is_multiple_of(2)
-}
-
-/// Blink toggle boundaries strictly inside `(start, end)`, each paired with
-/// the phase that begins there (`true` = cursor shown). Pure so the boundary
-/// math is unit-testable; phases align to absolute time, not the gap start,
-/// so cadence stays continuous across frames.
-fn blink_frames(start: Duration, end: Duration, half_period: Duration) -> Vec<(Duration, bool)> {
-    let half_ms = half_period.as_millis() as u64;
-    let mut frames = Vec::new();
-    if half_ms == 0 || end <= start {
-        return frames;
-    }
-    let start_ms = start.as_millis() as u64;
-    let end_ms = end.as_millis() as u64;
-    let mut k = start_ms / half_ms + 1; // first boundary after `start`
-    while k * half_ms < end_ms {
-        frames.push((Duration::from_millis(k * half_ms), k.is_multiple_of(2)));
-        k += 1;
-    }
-    frames
-}
-
 /// Whether the child has mouse reporting enabled: scans Output events for
 /// DEC private modes 1000/1002/1003 (`CSI ? … h|l`, `;`-separated parameter
 /// lists included); the last set/reset wins. Only called on scroll commands,
@@ -1056,7 +1295,7 @@ fn mouse_reporting_enabled(events: &[SessionEvent]) -> bool {
 
 // ---- Settings -------------------------------------------------------------------
 
-fn apply_setting(settings: &mut Settings, cmd: &Command, quiet: bool) {
+pub(crate) fn apply_setting(settings: &mut Settings, cmd: &Command, quiet: bool) {
     let v = cmd.args.as_str();
     let warn = |msg: String| {
         if !quiet {
@@ -1195,7 +1434,7 @@ fn shell_argv(shell: &str) -> Vec<String> {
 /// Finds `bin` on `env_path` (the child's `Env PATH` override) or the
 /// inherited PATH. Only executable regular files count — a data file that
 /// happens to share the binary's name must not satisfy `Require`.
-fn which(bin: &str, env_path: Option<&str>) -> Option<PathBuf> {
+pub(crate) fn which(bin: &str, env_path: Option<&str>) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let path = env_path
         .map(std::ffi::OsString::from)
@@ -1214,12 +1453,7 @@ fn io_fail(e: std::io::Error) -> StepFailure {
 }
 
 fn runtime_fail(message: String) -> StepFailure {
-    StepFailure {
-        exit: ExitKind::Runtime,
-        reason: None,
-        message,
-        detail: None,
-    }
+    StepFailure::runtime(message)
 }
 
 /// The resolution side table disagreed with the command list — impossible
@@ -1235,131 +1469,10 @@ fn resolved_mismatch(cmd: &Command) -> StepFailure {
 mod tests {
     use super::*;
 
-    fn ms(v: u64) -> Duration {
-        Duration::from_millis(v)
-    }
-
-    #[test]
-    fn blink_phase_follows_half_periods() {
-        let half = ms(530);
-        // [0, 530) on, [530, 1060) off, [1060, 1590) on, ...
-        assert!(blink_phase_on(ms(0), half));
-        assert!(blink_phase_on(ms(529), half));
-        assert!(!blink_phase_on(ms(530), half));
-        assert!(!blink_phase_on(ms(1059), half));
-        assert!(blink_phase_on(ms(1060), half));
-        assert!(!blink_phase_on(ms(530 * 3), half));
-    }
-
-    #[test]
-    fn blink_frames_boundary_math() {
-        let half = ms(530);
-
-        // Gap shorter than the half-period: no synthesized frames.
-        assert!(blink_frames(ms(0), ms(529), half).is_empty());
-        assert!(blink_frames(ms(600), ms(1000), half).is_empty());
-
-        // Empty and inverted ranges.
-        assert!(blink_frames(ms(100), ms(100), half).is_empty());
-        assert!(blink_frames(ms(200), ms(100), half).is_empty());
-
-        // A 2s gap from t=0 crosses boundaries at 530/1060/1590 with
-        // alternating phases (off, on, off).
-        let frames = blink_frames(ms(0), ms(2000), half);
-        assert_eq!(
-            frames,
-            vec![(ms(530), false), (ms(1060), true), (ms(1590), false)]
-        );
-
-        // Boundaries are exclusive at both ends.
-        let frames = blink_frames(ms(530), ms(1060), half);
-        assert!(frames.is_empty(), "got {frames:?}");
-
-        // Phase aligns to absolute time, not to the gap start: a gap starting
-        // mid-phase still toggles at global boundaries.
-        let frames = blink_frames(ms(700), ms(1700), half);
-        assert_eq!(frames, vec![(ms(1060), true), (ms(1590), false)]);
-    }
-
     fn out(s: &str) -> SessionEvent {
         SessionEvent {
             time: Duration::ZERO,
             kind: SessionEventKind::Output(s.into()),
-        }
-    }
-
-    /// Replaying the same event log twice must produce byte-identical GIFs,
-    /// and the file's structure (dimensions, frame count, delays) must match
-    /// what the blink/coalescing rules predict independently.
-    #[test]
-    fn encode_gif_replay_is_deterministic() {
-        let at = |ms: u64, kind: SessionEventKind| SessionEvent {
-            time: Duration::from_millis(ms),
-            kind,
-        };
-        // Blink half-period is 530ms: the 100→700ms gap synthesizes an
-        // off-frame at 530, the 700→1200 gap an on-frame at 1060; the final
-        // cursor-on re-push at 1200 is identical to the pending frame at
-        // 1060 and coalesces.
-        let events = vec![
-            at(0, SessionEventKind::Output("hello".into())),
-            at(100, SessionEventKind::Output("x".into())),
-            at(700, SessionEventKind::Output("y".into())),
-            at(1200, SessionEventKind::Exit),
-        ];
-
-        let settings = Settings {
-            render: RenderOptions {
-                width: 200,
-                height: 100,
-                padding: 10,
-                font_size: 16.0,
-                ..RenderOptions::default()
-            },
-            ..Settings::default()
-        };
-        let mut renderer = Renderer::new(settings.render.clone(), settings.theme.clone());
-
-        let path = |run: usize| {
-            std::env::temp_dir().join(format!(
-                "vhs_rs-eval-gif-determinism-{}-{run}.gif",
-                std::process::id()
-            ))
-        };
-        for run in 0..2 {
-            encode_gif(
-                path(run).to_str().unwrap(),
-                &settings,
-                &mut renderer,
-                &events,
-                (16, 5),
-                settings.theme.clone(),
-                &[],
-            )
-            .unwrap();
-        }
-        let bytes0 = std::fs::read(path(0)).unwrap();
-        let bytes1 = std::fs::read(path(1)).unwrap();
-        assert_eq!(bytes0, bytes1, "two replays produced different files");
-
-        // Structure: frames at 0/100/530/700/1060 written (the 1200 re-push
-        // coalesces), delays = successor gaps in centiseconds + 1s hold.
-        // `::gif` is the external decoder crate (the local `gif` name is the
-        // encoder module imported above).
-        let mut options = ::gif::DecodeOptions::new();
-        options.set_color_output(::gif::ColorOutput::RGBA);
-        let mut decoder = options
-            .read_info(std::fs::File::open(path(0)).unwrap())
-            .unwrap();
-        assert_eq!((decoder.width(), decoder.height()), (200, 100));
-        let mut delays = Vec::new();
-        while let Some(frame) = decoder.read_next_frame().unwrap() {
-            delays.push(frame.delay);
-        }
-        assert_eq!(delays, vec![10, 43, 17, 36, 100]);
-
-        for run in 0..2 {
-            std::fs::remove_file(path(run)).ok();
         }
     }
 

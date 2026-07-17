@@ -131,6 +131,32 @@ fn success_is_exit_zero() {
     assert_eq!(r["exit_code"], 0);
 }
 
+#[test]
+fn screen_command_reports_current_screen() {
+    let dir = scratch("screen");
+    let out = run_json_in(
+        &dir,
+        "Type \"echo screen-detail\"\nEnter\nWait\nScreen\n",
+        &[],
+    );
+    let r = report(&out);
+    assert_report_invariants(&r, &out);
+    let screen = r["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["command"] == "Screen")
+        .expect("screen command");
+    assert_eq!(screen["status"], "ok");
+    assert!(
+        screen["detail"]["screen_text"]
+            .as_str()
+            .unwrap()
+            .contains("screen-detail")
+    );
+    assert!(screen["detail"]["cursor"]["row"].is_u64());
+}
+
 // ---- Child death must never masquerade as success or timeout ----------------
 
 #[test]
@@ -381,6 +407,85 @@ fn continuation_prompt_does_not_satisfy_wait() {
     assert_report_invariants(&r, &out);
     assert_eq!(r["status"], "wait_timeout", "report: {r}");
     assert_eq!(r["exit_code"], 3);
+}
+
+// ---- Timeline recording -------------------------------------------------------
+
+#[test]
+fn record_streams_a_replayable_timeline() {
+    let dir = scratch("record");
+    let tape = "Type \"echo timeline\"\nEnter\nWait\nSet Theme \"Dracula\"\nHide\nShow\n";
+    let out = run_json_in(&dir, tape, &["--record", "session.jsonl"]);
+    let r = report(&out);
+    assert_report_invariants(&r, &out);
+    assert_eq!(r["status"], "success", "report: {r}");
+
+    // Reported as an artifact.
+    let kinds: Vec<&str> = r["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["kind"].as_str())
+        .collect();
+    assert!(kinds.contains(&"timeline"), "artifacts: {kinds:?}");
+
+    // Header first, then kind-tagged events including the command markers,
+    // the mid-run theme change, visibility toggles, and the final exit.
+    let raw = std::fs::read_to_string(dir.join("session.jsonl")).unwrap();
+    let lines: Vec<serde_json::Value> = raw
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("every line is JSON"))
+        .collect();
+    assert_eq!(lines[0]["kind"], "header");
+    assert_eq!(lines[0]["version"], 1);
+    assert!(lines[0]["cols"].as_u64().unwrap() > 0);
+    assert_eq!(lines[0]["theme"]["background"], "#171717");
+
+    let kinds: Vec<&str> = lines[1..]
+        .iter()
+        .map(|l| l["kind"].as_str().unwrap())
+        .collect();
+    assert!(kinds.contains(&"output"));
+    assert!(kinds.contains(&"command"));
+    assert!(kinds.contains(&"theme"));
+    assert!(kinds.contains(&"visibility"));
+    assert_eq!(*kinds.last().unwrap(), "exit");
+
+    let marker = lines[1..].iter().find(|l| l["kind"] == "command").unwrap();
+    assert_eq!(marker["status"], "ok");
+    assert!(marker["t_us"].is_u64());
+}
+
+#[test]
+fn kill_nine_mid_run_leaves_a_parseable_timeline() {
+    let dir = scratch("record-kill9");
+    let tape = TempTape::new(
+        "record-kill9",
+        "Type \"echo before-the-kill\"\nEnter\nWait\nSleep 30s\n",
+    );
+    let child = vhs_rs()
+        .args(["run", "--record", "killed.jsonl", tape.path()])
+        .current_dir(&dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn");
+    std::thread::sleep(std::time::Duration::from_millis(2000));
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(child.id() as i32),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("send SIGKILL");
+    // Reap; SIGKILL means no report, no cleanup — only the streamed file.
+    let _ = child.wait_with_output();
+
+    let raw = std::fs::read_to_string(dir.join("killed.jsonl")).expect("timeline exists");
+    let lines: Vec<&str> = raw.lines().collect();
+    assert!(lines.len() >= 2, "header plus at least one event: {raw:?}");
+    let header: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(header["kind"], "header");
+    // Every fully written line parses; the echoed output made it to disk.
+    assert!(raw.contains("before-the-kill"));
 }
 
 #[test]

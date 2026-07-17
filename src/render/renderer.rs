@@ -86,8 +86,9 @@ impl Canvas {
     }
 }
 
-/// Window bar styles, matching VHS's `Set WindowBar` values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Window bar styles, matching VHS's `Set WindowBar` values. Serializes as
+/// the `Set WindowBar` string (`"Colorful"`, ...).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BarStyle {
     Colorful,
     ColorfulRight,
@@ -116,9 +117,34 @@ pub enum MarginFill {
     Theme,
 }
 
+/// Wire format: `null` = theme background, `"#rrggbb"` = fixed color.
+impl serde::Serialize for MarginFill {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Theme => s.serialize_none(),
+            Self::Color(c) => s.serialize_str(&c.to_hex()),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for MarginFill {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match Option::<String>::deserialize(d)? {
+            None => Ok(Self::Theme),
+            Some(hex) => Rgb::from_hex(&hex).map(Self::Color).ok_or_else(|| {
+                serde::de::Error::custom(format!("margin_fill {hex:?}: not a #rrggbb color"))
+            }),
+        }
+    }
+}
+
 /// Frame styling options, defaults ported from VHS (vhs/style.go
 /// DefaultStyleOptions + vhs/vhs.go DefaultVHSOptions).
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Serde: missing fields take defaults, unknown fields are ignored — a
+/// timeline written by a newer vhs_rs still renders on this one.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct RenderOptions {
     pub width: usize,
     pub height: usize,
@@ -204,6 +230,27 @@ impl Renderer {
             #[cfg(test)]
             damage_repaints: 0,
         }
+    }
+
+    /// A renderer whose canvas is sized to fit a `cols × rows` grid — the
+    /// inverse of [`Renderer::term_size`]. `opts.width`/`opts.height` are
+    /// ignored and recomputed from the grid, padding, margin, and window
+    /// bar. Recorded timelines carry the authoritative grid; the canvas
+    /// derives from it, so a font-metrics change across versions can alter
+    /// output pixel dimensions but never the replayed content.
+    pub fn for_grid(mut opts: RenderOptions, theme: Theme, cols: usize, rows: usize) -> Self {
+        let fonts = FontSet::new(opts.font_size);
+        let metrics = fonts.metrics(opts.line_height, opts.letter_spacing);
+        let bar = if opts.window_bar.is_some() {
+            opts.window_bar_size
+        } else {
+            0
+        };
+        opts.width =
+            (cols as f32 * metrics.cell_w).ceil() as usize + 2 * (opts.padding + opts.margin);
+        opts.height =
+            (rows as f32 * metrics.cell_h).ceil() as usize + bar + 2 * (opts.padding + opts.margin);
+        Self::new(opts, theme)
     }
 
     pub fn options(&self) -> &RenderOptions {
@@ -892,6 +939,31 @@ mod tests {
             stats.frames_written
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn for_grid_inverts_term_size() {
+        let theme = default_theme();
+        for (cols, rows) in [(77, 21), (80, 24), (20, 5), (132, 43)] {
+            for opts in [
+                RenderOptions::default(),
+                RenderOptions {
+                    window_bar: Some(BarStyle::Colorful),
+                    margin: 12,
+                    padding: 30,
+                    font_size: 16.0,
+                    ..RenderOptions::default()
+                },
+            ] {
+                let r = Renderer::for_grid(opts, theme.clone(), cols, rows);
+                assert_eq!(
+                    r.term_size(),
+                    (cols, rows),
+                    "grid {cols}x{rows} opts {:?}",
+                    r.options()
+                );
+            }
+        }
     }
 
     #[test]

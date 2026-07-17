@@ -155,28 +155,28 @@ Wait+Screen@1m /foo\\\/bar/"#;
         (Number, "2"),
         (Wait, "Wait"),
         (Plus, "+"),
-        (String, "Screen"),
+        (Screen, "Screen"),
         (At, "@"),
         (Number, "1"),
         (Minutes, "m"),
         (Regex, "foobar"),
         (Wait, "Wait"),
         (Plus, "+"),
-        (String, "Screen"),
+        (Screen, "Screen"),
         (At, "@"),
         (Number, "1"),
         (Minutes, "m"),
         (Regex, r"foo\/bar"),
         (Wait, "Wait"),
         (Plus, "+"),
-        (String, "Screen"),
+        (Screen, "Screen"),
         (At, "@"),
         (Number, "1"),
         (Minutes, "m"),
         (Regex, r"foo\\"),
         (Wait, "Wait"),
         (Plus, "+"),
-        (String, "Screen"),
+        (Screen, "Screen"),
         (At, "@"),
         (Number, "1"),
         (Minutes, "m"),
@@ -846,6 +846,22 @@ fn test_assert_with_timeout() {
     let cmds = p.parse();
     assert!(p.errors().is_empty(), "unexpected errors: {:?}", p.errors());
     assert_commands(&cmds, &[(Assert, "5s", "Line x")]);
+}
+
+#[test]
+fn test_screen_scope_still_parses_after_screen_keyword() {
+    let mut p = Parser::new("Wait+Screen@5s /x/\nAssert+Screen /y/");
+    let cmds = p.parse();
+    assert!(p.errors().is_empty(), "unexpected errors: {:?}", p.errors());
+    assert_commands(&cmds, &[(Wait, "5s", "Screen x"), (Assert, "", "Screen y")]);
+}
+
+#[test]
+fn test_screen_command() {
+    let mut p = Parser::new("Screen");
+    let cmds = p.parse();
+    assert!(p.errors().is_empty(), "unexpected errors: {:?}", p.errors());
+    assert_commands(&cmds, &[(Screen, "", "")]);
 }
 
 #[test]

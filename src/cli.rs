@@ -48,6 +48,52 @@ enum Cmd {
     /// Parse and validate a tape without executing it
     #[command(after_help = EXIT_CODES_HELP)]
     Check(CheckArgs),
+
+    /// Render artifacts from a recorded timeline (.jsonl or .cast) without
+    /// executing anything
+    #[command(after_help = EXIT_CODES_HELP)]
+    Render(RenderArgs),
+
+    /// Drive a persistent PTY with one tape-language line at a time
+    #[command(after_help = EXIT_CODES_HELP)]
+    Repl(ReplArgs),
+}
+
+#[derive(Args)]
+struct RenderArgs {
+    /// Recorded timeline: a vhs-rs .jsonl or an asciicast .cast (v2/v3)
+    input: String,
+
+    /// Output path, repeatable; the extension picks the format
+    /// (.gif, .png, .txt, .cast)
+    #[arg(short, long = "output", value_name = "PATH", required = true)]
+    output: Vec<String>,
+
+    /// Theme override: builtin name or inline JSON (mutes recorded mid-run
+    /// theme changes)
+    #[arg(long)]
+    theme: Option<String>,
+
+    /// Cap silent gaps between events (e.g. 2s) — agent thinking pauses
+    /// stop being GIF freeze-frames
+    #[arg(long, value_parser = parse_timeout, value_name = "DURATION")]
+    idle_limit: Option<Duration>,
+
+    /// Playback speed multiplier (delays divided by this)
+    #[arg(long)]
+    speed: Option<f64>,
+
+    /// GIF frame-rate cap (max 50)
+    #[arg(long)]
+    framerate: Option<f64>,
+
+    /// Font size override (the canvas re-derives from the recorded grid)
+    #[arg(long)]
+    font_size: Option<f32>,
+
+    /// Suppress warnings and progress output (errors are still printed)
+    #[arg(long)]
+    quiet: bool,
 }
 
 #[derive(Args)]
@@ -67,6 +113,30 @@ struct RunArgs {
     /// with exit 4, reason `run_timeout`, and still writes report + forensics
     #[arg(long, value_parser = parse_timeout)]
     timeout: Option<Duration>,
+
+    /// Stream the session to a .jsonl timeline as it runs (crash-safe;
+    /// render it later with `vhs-rs render`)
+    #[arg(long, value_name = "PATH")]
+    record: Option<String>,
+}
+
+#[derive(Args)]
+struct ReplArgs {
+    /// Abort the session on the first failed command
+    #[arg(long)]
+    strict: bool,
+
+    /// Suppress warnings and progress output (protocol JSON still goes to stdout)
+    #[arg(long)]
+    quiet: bool,
+
+    /// Whole-session wall-clock budget (e.g. 30s, 2m)
+    #[arg(long, value_parser = parse_timeout)]
+    timeout: Option<Duration>,
+
+    /// Stream the session to a .jsonl timeline as it runs
+    #[arg(long, value_name = "PATH")]
+    record: Option<String>,
 }
 
 fn parse_timeout(s: &str) -> Result<Duration, String> {
@@ -98,6 +168,22 @@ pub fn main() -> i32 {
     match cli.command {
         Some(Cmd::Run(args)) => run(args),
         Some(Cmd::Check(args)) => check(args),
+        Some(Cmd::Render(args)) => crate::cmd_render::render(&crate::cmd_render::RenderRequest {
+            input: args.input,
+            outputs: args.output,
+            theme: args.theme,
+            idle_limit: args.idle_limit,
+            speed: args.speed,
+            framerate: args.framerate,
+            font_size: args.font_size,
+            quiet: args.quiet,
+        }),
+        Some(Cmd::Repl(args)) => crate::repl::repl(&crate::repl::ReplRequest {
+            strict: args.strict,
+            quiet: args.quiet,
+            timeout: args.timeout,
+            record: args.record,
+        }),
         None => run(cli.run),
     }
 }
@@ -228,7 +314,14 @@ fn run(args: RunArgs) -> i32 {
             Err(code) => return code,
         };
 
-    crate::evaluator::run(&path, &commands, args.json, args.quiet, args.timeout)
+    crate::evaluator::run(
+        &path,
+        &commands,
+        args.json,
+        args.quiet,
+        args.timeout,
+        args.record.as_deref(),
+    )
 }
 
 fn check(args: CheckArgs) -> i32 {

@@ -129,6 +129,127 @@ pub fn write_cast(path: &Path, meta: &CastMeta, events: &[SessionEvent]) -> io::
     out.flush()
 }
 
+// ---- Reader (v2 + v3 import) --------------------------------------------------
+
+/// An imported asciicast, reduced to what vhs_rs replays: the grid and the
+/// session events. Codes vhs_rs has no use for (`i` input, `m` markers,
+/// unknown extensions) are skipped and noted in `warnings`.
+#[derive(Debug)]
+pub struct CastImport {
+    pub cols: usize,
+    pub rows: usize,
+    pub events: Vec<SessionEvent>,
+    pub warnings: Vec<String>,
+}
+
+/// Reading can fail on I/O or a malformed header/event line.
+#[derive(Debug, thiserror::Error)]
+pub enum CastError {
+    #[error("{0}")]
+    Io(#[from] io::Error),
+    #[error("line {0}: {1}")]
+    Parse(usize, String),
+}
+
+/// Reads an asciicast v2 or v3 file. The two differ in header keys
+/// (v2 `width`/`height`, v3 `term.cols`/`term.rows`) and time semantics
+/// (v2 events carry absolute seconds, v3 carries intervals since the
+/// previous event); both reduce to absolute-time [`SessionEvent`]s.
+///
+/// # Errors
+/// [`CastError`] on I/O failure or a malformed header or event line.
+pub fn read_cast(path: &Path) -> Result<CastImport, CastError> {
+    let raw = fs::read_to_string(path)?;
+    let mut lines = raw.lines().enumerate();
+
+    let (_, header_line) = lines
+        .next()
+        .ok_or_else(|| CastError::Parse(1, "empty file: no header line".into()))?;
+    let header: serde_json::Value = serde_json::from_str(header_line)
+        .map_err(|e| CastError::Parse(1, format!("header is not JSON: {e}")))?;
+    let version = header["version"].as_u64().unwrap_or(0);
+    let (cols, rows) = match version {
+        2 => (&header["width"], &header["height"]),
+        3 => (&header["term"]["cols"], &header["term"]["rows"]),
+        v => {
+            return Err(CastError::Parse(
+                1,
+                format!("unsupported asciicast version {v} (vhs-rs reads v2 and v3)"),
+            ));
+        }
+    };
+    let (cols, rows) = match (cols.as_u64(), rows.as_u64()) {
+        (Some(c), Some(r)) if c > 0 && r > 0 => (c as usize, r as usize),
+        _ => {
+            return Err(CastError::Parse(
+                1,
+                "header carries no terminal size".into(),
+            ));
+        }
+    };
+
+    let mut import = CastImport {
+        cols,
+        rows,
+        events: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let mut clock = Duration::ZERO; // v3: running absolute time
+
+    for (i, line) in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let ev: (f64, String, serde_json::Value) = serde_json::from_str(line)
+            .map_err(|e| CastError::Parse(i + 1, format!("not an event triple: {e}")))?;
+        let (t, code, data) = ev;
+        if !t.is_finite() || t < 0.0 {
+            return Err(CastError::Parse(i + 1, format!("bad event time {t}")));
+        }
+        let time = if version == 2 {
+            Duration::from_secs_f64(t)
+        } else {
+            clock += Duration::from_secs_f64(t);
+            clock
+        };
+
+        let kind = match code.as_str() {
+            "o" => {
+                let Some(s) = data.as_str() else {
+                    return Err(CastError::Parse(
+                        i + 1,
+                        "output data is not a string".into(),
+                    ));
+                };
+                SessionEventKind::Output(s.to_string())
+            }
+            "r" => {
+                let size = data.as_str().unwrap_or_default();
+                let Some((c, r)) = size
+                    .split_once('x')
+                    .and_then(|(c, r)| Some((c.parse().ok()?, r.parse().ok()?)))
+                else {
+                    return Err(CastError::Parse(
+                        i + 1,
+                        format!("resize data {size:?} is not COLSxROWS"),
+                    ));
+                };
+                SessionEventKind::Resize(c, r)
+            }
+            "x" => SessionEventKind::Exit,
+            other => {
+                import
+                    .warnings
+                    .push(format!("line {}: skipped {other:?} event", i + 1));
+                continue;
+            }
+        };
+        import.events.push(SessionEvent { time, kind });
+    }
+
+    Ok(import)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +375,81 @@ mod tests {
             line,
             "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24,\"type\":\"xterm-256color\"}}"
         );
+    }
+
+    #[test]
+    fn read_cast_v3_round_trips_the_writer() {
+        let path = tmp_path("readv3/session.cast");
+        let meta = CastMeta {
+            cols: 80,
+            rows: 24,
+            command: None,
+            title: None,
+            env: Vec::new(),
+        };
+        let events = vec![
+            event(ms(500), SessionEventKind::Output("hello".into())),
+            event(ms(1000), SessionEventKind::Resize(100, 30)),
+            event(ms(1250), SessionEventKind::Exit),
+        ];
+        write_cast(&path, &meta, &events).unwrap();
+
+        let import = read_cast(&path).unwrap();
+        assert_eq!((import.cols, import.rows), (80, 24));
+        assert!(import.warnings.is_empty());
+        assert_eq!(import.events, events);
+
+        fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn read_cast_v2_absolute_times_and_skipped_codes() {
+        let path = tmp_path("readv2/session.cast");
+        let v2 = concat!(
+            "{\"version\":2,\"width\":20,\"height\":5}\n",
+            "[0.5, \"o\", \"hi\"]\n",
+            "[0.75, \"i\", \"typed\"]\n",
+            "[1.0, \"m\", \"marker\"]\n",
+            "[1.5, \"o\", \"bye\"]\n",
+            "[2.0, \"r\", \"30x10\"]\n",
+        );
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, v2).unwrap();
+
+        let import = read_cast(&path).unwrap();
+        assert_eq!((import.cols, import.rows), (20, 5));
+        assert_eq!(import.warnings.len(), 2, "{:?}", import.warnings);
+        assert_eq!(
+            import.events,
+            vec![
+                event(ms(500), SessionEventKind::Output("hi".into())),
+                event(ms(1500), SessionEventKind::Output("bye".into())),
+                event(ms(2000), SessionEventKind::Resize(30, 10)),
+            ]
+        );
+
+        fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn read_cast_rejects_garbage() {
+        let path = tmp_path("readbad/session.cast");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        fs::write(&path, "{\"version\":1,\"width\":20,\"height\":5}\n").unwrap();
+        assert!(matches!(read_cast(&path), Err(CastError::Parse(1, _))));
+
+        fs::write(&path, "{\"version\":2}\n").unwrap();
+        assert!(matches!(read_cast(&path), Err(CastError::Parse(1, _))));
+
+        fs::write(
+            &path,
+            "{\"version\":2,\"width\":20,\"height\":5}\n[0.5, \"o\"]\n",
+        )
+        .unwrap();
+        assert!(matches!(read_cast(&path), Err(CastError::Parse(2, _))));
+
+        fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[test]

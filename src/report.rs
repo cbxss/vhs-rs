@@ -42,6 +42,7 @@ pub enum ArtifactKind {
     Text,
     Golden,
     Cast,
+    Timeline,
     FailureText,
     FailurePng,
 }
