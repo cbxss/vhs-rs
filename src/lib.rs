@@ -52,6 +52,7 @@ pub mod encode {
 pub mod artifacts;
 pub mod cli;
 pub mod evaluator;
+pub mod replay;
 pub mod report;
 pub mod resolve;
 

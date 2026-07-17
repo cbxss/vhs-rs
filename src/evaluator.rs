@@ -8,10 +8,11 @@
 
 use crate::artifacts::ArtifactRegistry;
 use crate::command::Command;
-use crate::encode::{cast, gif, png, txt};
+use crate::encode::{cast, png, txt};
 use crate::error::ExitKind;
 use crate::keys;
 use crate::render::{BarStyle, MarginFill, RenderOptions, Renderer};
+use crate::replay::{self, ReplaySpec};
 use crate::report::{ArtifactKind, CommandStatus, ReportBuilder};
 use crate::resolve::{Resolved, Scope, resolve_commands};
 use crate::session::Session;
@@ -26,12 +27,6 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tokio::signal::unix::{SignalKind, signal};
-
-/// Half-period of the synthesized cursor blink (xterm-ish cadence).
-const BLINK_HALF_PERIOD: Duration = Duration::from_millis(530);
-/// Idle gaps longer than this get no synthesized blink frames (degenerate
-/// tapes would otherwise balloon the GIF).
-const BLINK_MAX_GAP: Duration = Duration::from_secs(30);
 
 /// Everything `Set` can configure, with VHS defaults.
 struct Settings {
@@ -421,16 +416,28 @@ async fn run_inner(
                 let canvas = renderer.render(&session.term().snapshot());
                 png::write_png(Path::new(path), canvas).map(|_| ArtifactKind::Png)
             }
-            ".gif" => encode_gif(
-                path,
-                &settings,
-                &mut renderer,
-                session.events(),
-                (cols, rows),
-                initial_theme.clone(),
-                &theme_timeline,
-            )
-            .map(|_| ArtifactKind::Gif),
+            ".gif" => {
+                let spec = ReplaySpec {
+                    max_fps: settings.max_fps,
+                    playback_speed: settings.playback_speed,
+                    loop_offset: settings.loop_offset,
+                    cursor_blink: settings.cursor_blink,
+                    initial_theme: initial_theme.clone(),
+                    theme_timeline: theme_timeline.clone(),
+                };
+                let result = replay::encode_gif(
+                    Path::new(path),
+                    &spec,
+                    &mut renderer,
+                    session.events(),
+                    (cols, rows),
+                );
+                // The replay leaves the renderer on the timeline's last
+                // theme; later renders (Output .png, forensics) must use the
+                // run's final theme.
+                renderer.set_theme(settings.theme.clone());
+                result.map(|_| ArtifactKind::Gif)
+            }
             ".cast" => cast::write_cast(
                 Path::new(path),
                 &cast::CastMeta {
@@ -883,153 +890,6 @@ async fn settle(session: &mut Session, d: Duration) {
     }
 }
 
-// ---- GIF replay ---------------------------------------------------------------
-
-/// Replays the event log through a fresh emulator, rendering each visible
-/// state change into the styled frame and streaming it to the encoder.
-#[allow(clippy::too_many_arguments)]
-fn encode_gif(
-    path: &str,
-    settings: &Settings,
-    renderer: &mut Renderer,
-    events: &[SessionEvent],
-    size: (usize, usize),
-    initial_theme: Theme,
-    theme_timeline: &[(Duration, Theme)],
-) -> std::io::Result<()> {
-    let (cols, rows) = size;
-    let opts = renderer.options().clone();
-    let mut term = Term::new(cols, rows);
-    let mut enc = gif::GifEncoder::create(
-        Path::new(path),
-        gif::GifOptions {
-            max_fps: settings.max_fps,
-            playback_speed: settings.playback_speed,
-            ..gif::GifOptions::new(opts.width as u16, opts.height as u16)
-        },
-    )?;
-    if let Some(p) = settings.loop_offset {
-        enc.set_loop_offset(p);
-    }
-
-    // Start from the tape's initial theme; apply mid-tape changes at their time.
-    renderer.set_theme(initial_theme);
-    let mut theme_idx = 0;
-    let mut visible = true;
-    let blink = settings.cursor_blink;
-    // Double-buffered snapshots: `last_snap` is the grid of the last pushed
-    // frame (valid while `last_time` is `Some`; blink frames synthesize from
-    // it), `scratch` receives the next snapshot, and the two swap after each
-    // push — so per-event snapshotting allocates nothing at steady state.
-    let empty_snap = || crate::snapshot::GridSnapshot {
-        cols: 0,
-        rows: 0,
-        cells: Vec::new(),
-        cursor: crate::snapshot::Cursor {
-            col: 0,
-            row: 0,
-            visible: false,
-        },
-    };
-    let mut last_snap = empty_snap();
-    let mut scratch = empty_snap();
-    let mut last_time: Option<Duration> = None;
-
-    // Renders idle-gap blink toggles between the last frame and `until`.
-    let synth = |renderer: &mut Renderer,
-                 enc: &mut gif::GifEncoder,
-                 last: Option<Duration>,
-                 snap: &crate::snapshot::GridSnapshot,
-                 until: Duration|
-     -> std::io::Result<()> {
-        let Some(since) = last else {
-            return Ok(());
-        };
-        if !snap.cursor.visible || until.saturating_sub(since) > BLINK_MAX_GAP {
-            return Ok(());
-        }
-        for (t, on) in blink_frames(since, until, BLINK_HALF_PERIOD) {
-            let canvas = renderer.render_frame(snap, on);
-            enc.push_frame(t, &canvas.buf)?;
-        }
-        Ok(())
-    };
-
-    let mut end_time = Duration::ZERO;
-    for ev in events {
-        while theme_idx < theme_timeline.len() && theme_timeline[theme_idx].0 <= ev.time {
-            renderer.set_theme(theme_timeline[theme_idx].1.clone());
-            theme_idx += 1;
-        }
-        end_time = end_time.max(ev.time);
-        match &ev.kind {
-            SessionEventKind::Output(s) => {
-                if visible && blink {
-                    synth(renderer, &mut enc, last_time, &last_snap, ev.time)?;
-                }
-                term.feed(s);
-                if visible {
-                    term.snapshot_into(&mut scratch);
-                    let cursor_on = !blink || blink_phase_on(ev.time, BLINK_HALF_PERIOD);
-                    let canvas = renderer.render_frame(&scratch, cursor_on);
-                    enc.push_frame(ev.time, &canvas.buf)?;
-                    std::mem::swap(&mut last_snap, &mut scratch);
-                    last_time = Some(ev.time);
-                }
-            }
-            SessionEventKind::Resize(c, r) => {
-                term.resize(*c, *r);
-                last_time = None; // stale grid; don't synthesize from it
-            }
-            SessionEventKind::Visibility(v) => visible = *v,
-            SessionEventKind::Exit => {
-                // Blink through the trailing idle gap before the child exits.
-                if visible && blink {
-                    synth(renderer, &mut enc, last_time, &last_snap, ev.time)?;
-                }
-                break;
-            }
-        }
-    }
-
-    // The held final frame must end cursor-visible: re-push the last grid
-    // with the cursor on (coalesces if the pending frame already shows it).
-    if blink && last_time.is_some() {
-        let canvas = renderer.render_frame(&last_snap, true);
-        enc.push_frame(end_time, &canvas.buf)?;
-    }
-
-    // Restore the final theme for any later renders (Output .png, forensics).
-    renderer.set_theme(settings.theme.clone());
-    enc.finish()?;
-    Ok(())
-}
-
-/// Blink phase at absolute session time `t`: `true` = cursor shown.
-fn blink_phase_on(t: Duration, half_period: Duration) -> bool {
-    (t.as_millis() / half_period.as_millis()).is_multiple_of(2)
-}
-
-/// Blink toggle boundaries strictly inside `(start, end)`, each paired with
-/// the phase that begins there (`true` = cursor shown). Pure so the boundary
-/// math is unit-testable; phases align to absolute time, not the gap start,
-/// so cadence stays continuous across frames.
-fn blink_frames(start: Duration, end: Duration, half_period: Duration) -> Vec<(Duration, bool)> {
-    let half_ms = half_period.as_millis() as u64;
-    let mut frames = Vec::new();
-    if half_ms == 0 || end <= start {
-        return frames;
-    }
-    let start_ms = start.as_millis() as u64;
-    let end_ms = end.as_millis() as u64;
-    let mut k = start_ms / half_ms + 1; // first boundary after `start`
-    while k * half_ms < end_ms {
-        frames.push((Duration::from_millis(k * half_ms), k.is_multiple_of(2)));
-        k += 1;
-    }
-    frames
-}
-
 /// Whether the child has mouse reporting enabled: scans Output events for
 /// DEC private modes 1000/1002/1003 (`CSI ? … h|l`, `;`-separated parameter
 /// lists included); the last set/reset wins. Only called on scroll commands,
@@ -1235,131 +1095,10 @@ fn resolved_mismatch(cmd: &Command) -> StepFailure {
 mod tests {
     use super::*;
 
-    fn ms(v: u64) -> Duration {
-        Duration::from_millis(v)
-    }
-
-    #[test]
-    fn blink_phase_follows_half_periods() {
-        let half = ms(530);
-        // [0, 530) on, [530, 1060) off, [1060, 1590) on, ...
-        assert!(blink_phase_on(ms(0), half));
-        assert!(blink_phase_on(ms(529), half));
-        assert!(!blink_phase_on(ms(530), half));
-        assert!(!blink_phase_on(ms(1059), half));
-        assert!(blink_phase_on(ms(1060), half));
-        assert!(!blink_phase_on(ms(530 * 3), half));
-    }
-
-    #[test]
-    fn blink_frames_boundary_math() {
-        let half = ms(530);
-
-        // Gap shorter than the half-period: no synthesized frames.
-        assert!(blink_frames(ms(0), ms(529), half).is_empty());
-        assert!(blink_frames(ms(600), ms(1000), half).is_empty());
-
-        // Empty and inverted ranges.
-        assert!(blink_frames(ms(100), ms(100), half).is_empty());
-        assert!(blink_frames(ms(200), ms(100), half).is_empty());
-
-        // A 2s gap from t=0 crosses boundaries at 530/1060/1590 with
-        // alternating phases (off, on, off).
-        let frames = blink_frames(ms(0), ms(2000), half);
-        assert_eq!(
-            frames,
-            vec![(ms(530), false), (ms(1060), true), (ms(1590), false)]
-        );
-
-        // Boundaries are exclusive at both ends.
-        let frames = blink_frames(ms(530), ms(1060), half);
-        assert!(frames.is_empty(), "got {frames:?}");
-
-        // Phase aligns to absolute time, not to the gap start: a gap starting
-        // mid-phase still toggles at global boundaries.
-        let frames = blink_frames(ms(700), ms(1700), half);
-        assert_eq!(frames, vec![(ms(1060), true), (ms(1590), false)]);
-    }
-
     fn out(s: &str) -> SessionEvent {
         SessionEvent {
             time: Duration::ZERO,
             kind: SessionEventKind::Output(s.into()),
-        }
-    }
-
-    /// Replaying the same event log twice must produce byte-identical GIFs,
-    /// and the file's structure (dimensions, frame count, delays) must match
-    /// what the blink/coalescing rules predict independently.
-    #[test]
-    fn encode_gif_replay_is_deterministic() {
-        let at = |ms: u64, kind: SessionEventKind| SessionEvent {
-            time: Duration::from_millis(ms),
-            kind,
-        };
-        // Blink half-period is 530ms: the 100→700ms gap synthesizes an
-        // off-frame at 530, the 700→1200 gap an on-frame at 1060; the final
-        // cursor-on re-push at 1200 is identical to the pending frame at
-        // 1060 and coalesces.
-        let events = vec![
-            at(0, SessionEventKind::Output("hello".into())),
-            at(100, SessionEventKind::Output("x".into())),
-            at(700, SessionEventKind::Output("y".into())),
-            at(1200, SessionEventKind::Exit),
-        ];
-
-        let settings = Settings {
-            render: RenderOptions {
-                width: 200,
-                height: 100,
-                padding: 10,
-                font_size: 16.0,
-                ..RenderOptions::default()
-            },
-            ..Settings::default()
-        };
-        let mut renderer = Renderer::new(settings.render.clone(), settings.theme.clone());
-
-        let path = |run: usize| {
-            std::env::temp_dir().join(format!(
-                "vhs_rs-eval-gif-determinism-{}-{run}.gif",
-                std::process::id()
-            ))
-        };
-        for run in 0..2 {
-            encode_gif(
-                path(run).to_str().unwrap(),
-                &settings,
-                &mut renderer,
-                &events,
-                (16, 5),
-                settings.theme.clone(),
-                &[],
-            )
-            .unwrap();
-        }
-        let bytes0 = std::fs::read(path(0)).unwrap();
-        let bytes1 = std::fs::read(path(1)).unwrap();
-        assert_eq!(bytes0, bytes1, "two replays produced different files");
-
-        // Structure: frames at 0/100/530/700/1060 written (the 1200 re-push
-        // coalesces), delays = successor gaps in centiseconds + 1s hold.
-        // `::gif` is the external decoder crate (the local `gif` name is the
-        // encoder module imported above).
-        let mut options = ::gif::DecodeOptions::new();
-        options.set_color_output(::gif::ColorOutput::RGBA);
-        let mut decoder = options
-            .read_info(std::fs::File::open(path(0)).unwrap())
-            .unwrap();
-        assert_eq!((decoder.width(), decoder.height()), (200, 100));
-        let mut delays = Vec::new();
-        while let Some(frame) = decoder.read_next_frame().unwrap() {
-            delays.push(frame.delay);
-        }
-        assert_eq!(delays, vec![10, 43, 17, 36, 100]);
-
-        for run in 0..2 {
-            std::fs::remove_file(path(run)).ok();
         }
     }
 
