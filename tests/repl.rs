@@ -167,6 +167,19 @@ fn dead_child_is_reported_on_next_action() {
 }
 
 #[test]
+fn child_exit_during_lazy_spawn_uses_child_exited_reason() {
+    let dir = scratch("spawn-child-exit");
+    let out = repl_in(&dir, "Set Shell \"sh -c exit\"\nType \"echo nope\"\n", &[]);
+    assert_eq!(out.status.code(), Some(0));
+    let lines = json_lines(&out);
+    let failed = lines
+        .iter()
+        .find(|v| v["kind"] == "command" && v["status"] == "failed")
+        .expect("failed command");
+    assert_eq!(failed["failure"]["reason"], "child_exited");
+}
+
+#[test]
 fn eof_report_and_recorded_timeline_are_renderable() {
     let dir = scratch("record");
     let out = repl_in(

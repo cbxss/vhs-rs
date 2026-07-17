@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::command::Command;
 use crate::error::{ExitKind, ParseError};
-use crate::evaluator::{self, Engine, Settings, StepFailure, WaitOutcome};
+use crate::evaluator::{self, Engine, EngineSpec, Settings, StepFailure, WaitOutcome};
 use crate::parser::is_runtime_setting;
 use crate::report::{CommandStatus, ReportBuilder};
 use crate::resolve::{Resolved, resolve_commands};
@@ -235,42 +235,51 @@ async fn handle_input_line(
     };
 
     for (offset, (cmd, res)) in commands.iter().zip(resolved.iter()).enumerate() {
-        let control = handle_command(state, out, input_line, cmd, res, deadline).await;
-        if !control.wrote_response {
+        let Some(flow) = handle_command(state, out, input_line, cmd, res, deadline).await else {
             return false;
-        }
-        if control.stop_session {
-            for rest in commands.iter().skip(offset + 1) {
-                let index = state.next_index;
-                state.next_index += 1;
-                state
-                    .report
-                    .record(index, rest, CommandStatus::Skipped, Duration::ZERO, None);
-                if !write_json_line(
-                    out,
-                    &command_response(
-                        index,
-                        input_line,
-                        rest,
-                        CommandStatus::Skipped,
-                        Duration::ZERO,
-                        None,
-                        None,
-                    ),
-                ) {
-                    return false;
-                }
-            }
-            break;
+        };
+        if flow == CommandFlow::StopSession {
+            return write_skipped_commands(state, out, input_line, &commands[offset + 1..]);
         }
     }
 
     true
 }
 
-struct CommandControl {
-    wrote_response: bool,
-    stop_session: bool,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CommandFlow {
+    Continue,
+    StopSession,
+}
+
+fn write_skipped_commands(
+    state: &mut ReplState<'_>,
+    out: &mut impl Write,
+    input_line: usize,
+    commands: &[Command],
+) -> bool {
+    for cmd in commands {
+        let index = state.next_index;
+        state.next_index += 1;
+        state
+            .report
+            .record(index, cmd, CommandStatus::Skipped, Duration::ZERO, None);
+        if !write_json_line(
+            out,
+            &command_response(
+                index,
+                input_line,
+                cmd,
+                CommandStatus::Skipped,
+                Duration::ZERO,
+                None,
+                None,
+            ),
+        ) {
+            return false;
+        }
+    }
+    true
 }
 
 async fn handle_command(
@@ -280,7 +289,7 @@ async fn handle_command(
     cmd: &Command,
     res: &Resolved,
     deadline: Option<tokio::time::Instant>,
-) -> CommandControl {
+) -> Option<CommandFlow> {
     let index = state.next_index;
     state.next_index += 1;
     let step_start = std::time::Instant::now();
@@ -290,13 +299,7 @@ async fn handle_command(
         return write_result(state, out, index, input_line, cmd, elapsed, result).await;
     }
 
-    if let Err(msg) = ensure_engine(state, out).await {
-        let fail = StepFailure {
-            exit: ExitKind::Runtime,
-            reason: None,
-            message: msg,
-            detail: None,
-        };
+    if let Err(fail) = ensure_engine(state, out).await {
         return write_result(
             state,
             out,
@@ -319,12 +322,6 @@ async fn handle_command(
     {
         match engine.drain() {
             Ok(_) if engine.exited() => {
-                let fail = StepFailure {
-                    exit: ExitKind::Runtime,
-                    reason: Some("child_exited"),
-                    message: "child exited before this command could run".into(),
-                    detail: None,
-                };
                 return write_result(
                     state,
                     out,
@@ -332,17 +329,14 @@ async fn handle_command(
                     input_line,
                     cmd,
                     step_start.elapsed(),
-                    Err(fail),
+                    Err(StepFailure::runtime_reason(
+                        "child_exited",
+                        "child exited before this command could run",
+                    )),
                 )
                 .await;
             }
             Err(e) => {
-                let fail = StepFailure {
-                    exit: ExitKind::Runtime,
-                    reason: None,
-                    message: format!("PTY I/O error: {e}"),
-                    detail: None,
-                };
                 return write_result(
                     state,
                     out,
@@ -350,7 +344,7 @@ async fn handle_command(
                     input_line,
                     cmd,
                     step_start.elapsed(),
-                    Err(fail),
+                    Err(StepFailure::runtime(format!("PTY I/O error: {e}"))),
                 )
                 .await;
             }
@@ -404,15 +398,12 @@ fn handle_after_engine(
     index: usize,
 ) -> Option<Result<Option<serde_json::Value>, StepFailure>> {
     match cmd.command_type {
-        TokenType::Set if !is_runtime_setting(&cmd.options) => Some(Err(StepFailure {
-            exit: ExitKind::Runtime,
-            reason: None,
-            message: format!(
+        TokenType::Set if !is_runtime_setting(&cmd.options) => {
+            Some(Err(StepFailure::runtime(format!(
                 "Set {} cannot be used in repl after the shell has spawned",
                 cmd.options
-            ),
-            detail: None,
-        })),
+            ))))
+        }
         TokenType::Output => Some(add_output(state, res, index, true)),
         TokenType::Require => Some(require_ok(state, cmd)),
         _ => None,
@@ -430,13 +421,9 @@ fn add_output(
     };
 
     if spawned && matches!(ext.as_str(), ".txt" | ".ascii" | ".test") {
-        return Err(StepFailure {
-            exit: ExitKind::Runtime,
-            reason: None,
-            message: "golden text Output targets must be declared before the repl shell spawns"
-                .into(),
-            detail: None,
-        });
+        return Err(StepFailure::runtime(
+            "golden text Output targets must be declared before the repl shell spawns",
+        ));
     }
 
     if spawned
@@ -444,12 +431,7 @@ fn add_output(
         && let Some(engine) = state.engine.as_mut()
         && let Err(msg) = engine.add_timeline_output(TAPE_NAME, path)
     {
-        return Err(StepFailure {
-            exit: ExitKind::Runtime,
-            reason: None,
-            message: msg,
-            detail: None,
-        });
+        return Err(StepFailure::runtime(msg));
     }
 
     state.outputs.push((ext.clone(), path.clone()));
@@ -471,35 +453,36 @@ fn require_ok(
     if evaluator::which(&cmd.args, env_path).is_some() {
         Ok(None)
     } else {
-        Err(StepFailure {
-            exit: ExitKind::Runtime,
-            reason: None,
-            message: format!("Require: {} not found in PATH", cmd.args),
-            detail: None,
-        })
+        Err(StepFailure::runtime(format!(
+            "Require: {} not found in PATH",
+            cmd.args
+        )))
     }
 }
 
-async fn ensure_engine(state: &mut ReplState<'_>, out: &mut impl Write) -> Result<(), String> {
+async fn ensure_engine(state: &mut ReplState<'_>, out: &mut impl Write) -> Result<(), StepFailure> {
     if state.engine.is_some() {
         return Ok(());
     }
 
-    let mut engine = Engine::spawn(
-        TAPE_NAME,
-        std::mem::take(&mut state.settings),
-        std::mem::take(&mut state.spawn_env),
-        &state.outputs,
-        state.record,
-        state.quiet,
-        &mut state.report,
-    )?;
+    let spec = EngineSpec {
+        tape_name: TAPE_NAME,
+        settings: std::mem::take(&mut state.settings),
+        spawn_env: std::mem::take(&mut state.spawn_env),
+        outputs: &state.outputs,
+        record: state.record,
+        quiet: state.quiet,
+    };
+    let mut engine = Engine::spawn(spec, &mut state.report).map_err(StepFailure::runtime)?;
 
     match engine.initial_prompt_wait().await {
         Ok(WaitOutcome::ChildExited) => {
-            return Err(format!(
-                "shell {:?} exited before the repl started (bad Set Shell?)",
-                engine.argv()
+            return Err(StepFailure::runtime_reason(
+                "child_exited",
+                format!(
+                    "shell {:?} exited before the repl started (bad Set Shell?)",
+                    engine.argv()
+                ),
             ));
         }
         Ok(WaitOutcome::TimedOut) if !state.quiet => {
@@ -520,7 +503,7 @@ async fn ensure_engine(state: &mut ReplState<'_>, out: &mut impl Write) -> Resul
         out,
         &serde_json::json!({"kind": "term", "cols": cols, "rows": rows, "shell": shell}),
     ) {
-        return Err("failed to write term response".into());
+        return Err(StepFailure::runtime("failed to write term response"));
     }
     state.engine = Some(engine);
     Ok(())
@@ -539,12 +522,10 @@ async fn run_command_with_deadline(
         Some(deadline) => tokio::time::timeout_at(deadline, fut)
             .await
             .unwrap_or_else(|_| {
-                Err(StepFailure {
-                    exit: ExitKind::Runtime,
-                    reason: Some("run_timeout"),
-                    message: "--timeout exceeded; aborting the repl session".into(),
-                    detail: None,
-                })
+                Err(StepFailure::runtime_reason(
+                    "run_timeout",
+                    "--timeout exceeded; aborting the repl session",
+                ))
             }),
     }
 }
@@ -557,7 +538,7 @@ async fn write_result(
     cmd: &Command,
     elapsed: Duration,
     result: Result<Option<serde_json::Value>, StepFailure>,
-) -> CommandControl {
+) -> Option<CommandFlow> {
     let (status, detail, failure, stop_session, ok) = match result {
         Ok(detail) => (CommandStatus::Ok, detail, None, false, true),
         Err(fail) => {
@@ -606,9 +587,14 @@ async fn write_result(
     }
 
     let response = command_response(index, input_line, cmd, status, elapsed, detail, failure);
-    CommandControl {
-        wrote_response: write_json_line(out, &response),
-        stop_session,
+    if write_json_line(out, &response) {
+        Some(if stop_session {
+            CommandFlow::StopSession
+        } else {
+            CommandFlow::Continue
+        })
+    } else {
+        None
     }
 }
 
@@ -686,12 +672,7 @@ fn parse_errors_json(errors: &[ParseError]) -> Vec<serde_json::Value> {
 }
 
 fn internal_fail(message: &str) -> StepFailure {
-    StepFailure {
-        exit: ExitKind::Runtime,
-        reason: None,
-        message: format!("internal error: {message}"),
-        detail: None,
-    }
+    StepFailure::runtime(format!("internal error: {message}"))
 }
 
 async fn finish(mut state: ReplState<'_>, out: &mut impl Write) -> i32 {

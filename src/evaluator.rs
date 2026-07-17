@@ -70,6 +70,30 @@ pub(crate) struct StepFailure {
     pub(crate) detail: Option<serde_json::Value>,
 }
 
+impl StepFailure {
+    pub(crate) fn new(
+        exit: ExitKind,
+        reason: Option<&'static str>,
+        message: impl Into<String>,
+        detail: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            exit,
+            reason,
+            message: message.into(),
+            detail,
+        }
+    }
+
+    pub(crate) fn runtime(message: impl Into<String>) -> Self {
+        Self::new(ExitKind::Runtime, None, message, None)
+    }
+
+    pub(crate) fn runtime_reason(reason: &'static str, message: impl Into<String>) -> Self {
+        Self::new(ExitKind::Runtime, Some(reason), message, None)
+    }
+}
+
 /// What ended a [`wait_for`]: the pattern matched, the deadline passed, or
 /// the child exited (and the pattern can never match).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,9 +237,15 @@ async fn run_inner(
         }
     }
 
-    let mut engine = match Engine::spawn(
-        tape_name, settings, spawn_env, &outputs, record, quiet, report,
-    ) {
+    let spec = EngineSpec {
+        tape_name,
+        settings,
+        spawn_env,
+        outputs: &outputs,
+        record,
+        quiet,
+    };
+    let mut engine = match Engine::spawn(spec, report) {
         Ok(engine) => engine,
         Err(msg) => {
             report.set_failure(None, ExitKind::Runtime.reason(), msg);
@@ -268,12 +298,10 @@ async fn run_inner(
         let result = with_deadline(deadline, engine.exec(index, cmd, res))
             .await
             .unwrap_or_else(|| {
-                Err(StepFailure {
-                    exit: ExitKind::Runtime,
-                    reason: Some("run_timeout"),
-                    message: "--timeout exceeded; aborting the run".to_string(),
-                    detail: None,
-                })
+                Err(StepFailure::runtime_reason(
+                    "run_timeout",
+                    "--timeout exceeded; aborting the run",
+                ))
             });
 
         let elapsed = step_start.elapsed();
@@ -334,21 +362,29 @@ pub(crate) struct Engine {
     quiet: bool,
 }
 
+pub(crate) struct EngineSpec<'a> {
+    pub(crate) tape_name: &'a str,
+    pub(crate) settings: Settings,
+    pub(crate) spawn_env: Vec<(String, String)>,
+    pub(crate) outputs: &'a [(String, String)],
+    pub(crate) record: Option<&'a str>,
+    pub(crate) quiet: bool,
+}
+
 impl Engine {
     /// Builds the renderer, spawns the shell on a pinned deterministic
     /// environment, and opens the artifact/recording machinery. Sets the
     /// report's term info as soon as the terminal exists. `Err` carries the
     /// user-facing failure message (the caller maps it to `runtime_error`).
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn spawn(
-        tape_name: &str,
-        settings: Settings,
-        spawn_env: Vec<(String, String)>,
-        outputs: &[(String, String)],
-        record: Option<&str>,
-        quiet: bool,
-        report: &mut ReportBuilder,
-    ) -> Result<Self, String> {
+    pub(crate) fn spawn(spec: EngineSpec<'_>, report: &mut ReportBuilder) -> Result<Self, String> {
+        let EngineSpec {
+            tape_name,
+            settings,
+            spawn_env,
+            outputs,
+            record,
+            quiet,
+        } = spec;
         let initial_theme = settings.theme.clone();
 
         // ---- Renderer + geometry (cols/rows derive from font metrics).
@@ -412,19 +448,7 @@ impl Engine {
             .map(|(_, path)| path.clone())
             .chain(record.map(String::from))
             .collect();
-        let header = TimelineHeader {
-            version: TIMELINE_VERSION,
-            cols,
-            rows,
-            shell: settings.shell.clone(),
-            tape: Some(tape_name.to_string()),
-            theme: initial_theme.clone(),
-            render: settings.render.clone(),
-            cursor_blink: settings.cursor_blink,
-            max_fps: settings.max_fps,
-            playback_speed: settings.playback_speed,
-            loop_offset: settings.loop_offset,
-        };
+        let header = timeline_header(tape_name, &settings, &initial_theme, cols, rows);
         let recorder = Recorder::create(&jsonl_targets, &header)
             .map_err(|(path, e)| format!("failed to create timeline {path}: {e}"))?;
 
@@ -673,19 +697,13 @@ impl Engine {
         tape_name: &str,
         path: &str,
     ) -> Result<(), String> {
-        let header = TimelineHeader {
-            version: TIMELINE_VERSION,
-            cols: self.cols,
-            rows: self.rows,
-            shell: self.settings.shell.clone(),
-            tape: Some(tape_name.to_string()),
-            theme: self.initial_theme.clone(),
-            render: self.settings.render.clone(),
-            cursor_blink: self.settings.cursor_blink,
-            max_fps: self.settings.max_fps,
-            playback_speed: self.settings.playback_speed,
-            loop_offset: self.settings.loop_offset,
-        };
+        let header = timeline_header(
+            tape_name,
+            &self.settings,
+            &self.initial_theme,
+            self.cols,
+            self.rows,
+        );
         self.recorder
             .add(
                 path.to_string(),
@@ -694,6 +712,28 @@ impl Engine {
                 &self.theme_timeline,
             )
             .map_err(|e| format!("failed to create timeline {path}: {e}"))
+    }
+}
+
+fn timeline_header(
+    tape_name: &str,
+    settings: &Settings,
+    initial_theme: &Theme,
+    cols: usize,
+    rows: usize,
+) -> TimelineHeader {
+    TimelineHeader {
+        version: TIMELINE_VERSION,
+        cols,
+        rows,
+        shell: settings.shell.clone(),
+        tape: Some(tape_name.to_string()),
+        theme: initial_theme.clone(),
+        render: settings.render.clone(),
+        cursor_blink: settings.cursor_blink,
+        max_fps: settings.max_fps,
+        playback_speed: settings.playback_speed,
+        loop_offset: settings.loop_offset,
     }
 }
 
@@ -1147,12 +1187,7 @@ fn match_failure(
     if scope == Scope::Line {
         detail["line_text"] = term.current_line().into();
     }
-    StepFailure {
-        exit,
-        reason,
-        message,
-        detail: Some(detail),
-    }
+    StepFailure::new(exit, reason, message, Some(detail))
 }
 
 /// Event-driven wait: check, then await the next output chunk, re-check.
@@ -1418,12 +1453,7 @@ fn io_fail(e: std::io::Error) -> StepFailure {
 }
 
 fn runtime_fail(message: String) -> StepFailure {
-    StepFailure {
-        exit: ExitKind::Runtime,
-        reason: None,
-        message,
-        detail: None,
-    }
+    StepFailure::runtime(message)
 }
 
 /// The resolution side table disagreed with the command list — impossible
