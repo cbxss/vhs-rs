@@ -1,10 +1,10 @@
 [package]
 name = "vhs-rs"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 # Floor set by let-chains (1.88); edition 2024 alone would imply 1.85.
 rust-version = "1.88"
-description = "Agent-first terminal automation: VHS-compatible tapes, screenshots, GIFs — no browser"
+description = "Agent-first terminal automation for VHS-style tapes: drive PTYs, capture screenshots/GIFs, and record/replay sessions without a browser"
 license = "MIT"
 repository = "https://github.com/cbxss/vhs-rs"
 readme = "README.md"
