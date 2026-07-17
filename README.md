@@ -60,6 +60,9 @@ A few more ways to invoke it:
 
 ```sh
 vhs-rs run --json demo.tape        # same run, JSON report on stdout
+vhs-rs run --record s.jsonl demo.tape
+vhs-rs render s.jsonl -o demo.gif -o final.txt
+printf 'Type "date"\nEnter\nWait\nScreen\n' | vhs-rs repl
 vhs-rs check demo.tape             # parse + validate only, runs nothing
 echo 'Type "date"' | vhs-rs run -  # tape from stdin
 ```
@@ -150,8 +153,72 @@ Details an agent can rely on:
 - On a failed Wait/Assert, `detail.screen_text` is always the **full**
   screen; Line-scoped checks also carry `detail.line_text`, the single line
   the regex ran against.
+- `Screen` is the cheap readback command: it drains the PTY and returns
+  `{screen_text, cursor:{col,row,visible}}` in that command's `detail`.
 - Tapes read from stdin (`vhs-rs run -`) name their forensics
   `stdin.failure.txt` / `stdin.failure.png`.
+
+### Driving vhs-rs live
+
+`vhs-rs repl` keeps one PTY alive while stdin supplies one tape-language line
+at a time. Stdout is newline-delimited JSON only, flushed after every response;
+warnings stay on stderr. The first line is `{"kind":"ready","version":1}`.
+The shell spawns lazily on the first action command, then a one-time
+`{"kind":"term","cols":77,"rows":21,"shell":"bash"}` follows.
+
+Each input line produces at least one response:
+
+```jsonc
+{"kind":"command","index":0,"input_line":1,"command":"Type echo hi","status":"ok","elapsed_ms":512}
+{"kind":"empty","input_line":2}
+{"kind":"parse_error","input_line":3,"errors":[{"line":1,"col":1,"message":"Invalid command: Foo"}]}
+{"kind":"report", "version":1, "status":"success", "exit_code":0, ...}
+```
+
+Multi-command lines emit one `command` response per command, with a
+session-monotonic `index`. A line with parse errors is atomic: nothing from
+that line runs. Failed commands do **not** abort the REPL unless `--strict` is
+set; the agent can inspect the failure response and choose the next command.
+Use `--timeout 60s` as the session budget and prefer bounded waits like
+`Wait@2s /ready/`: a blocking `Wait` blocks the REPL until it matches or times
+out. Long sessions keep the in-memory event log, so the intended long-running
+workflow is `vhs-rs repl --record session.jsonl` followed by `vhs-rs render`;
+bounded retention is a future extension, not part of protocol v1.
+
+### Record now, render later
+
+`--record` on `run` or `repl` streams a native JSONL timeline as the session
+runs. `Output x.jsonl` does the same from a tape. The first line is a header
+with replay metadata:
+
+```jsonc
+{"kind":"header","version":1,"cols":77,"rows":21,"shell":"bash","tape":"demo.tape",
+ "theme":{...},"render":{...},"cursor_blink":true,
+ "max_fps":50.0,"playback_speed":1.0,"loop_offset":null}
+```
+
+Following lines are append-only events with microsecond timestamps:
+
+```jsonc
+{"kind":"output","t_us":1234,"data":"..."}
+{"kind":"resize","t_us":2000,"cols":100,"rows":30}
+{"kind":"visibility","t_us":3000,"visible":false}
+{"kind":"theme","t_us":4000,"theme":{...}}
+{"kind":"command","t_us":5000,"index":3,"line":9,"command":"Wait Line","status":"ok","elapsed_ms":132}
+{"kind":"exit","t_us":6000}
+```
+
+Render without re-running:
+
+```sh
+vhs-rs render session.jsonl -o replay.gif -o final.png -o final.txt
+vhs-rs render session.cast -o replay.gif --theme Dracula --idle-limit 2s --speed 1.5
+```
+
+The recorded grid is authoritative. Output dimensions are re-derived from the
+grid, font, and render options, so changing `--theme` or `--font-size` changes
+pixels without changing terminal content. `--idle-limit` caps long quiet gaps,
+and hidden spans are cut the same way VHS cuts `Hide`/`Show` sections.
 
 `vhs-rs check --json` prints `{"ok", "commands", "errors": [{"line", "col", "message"}]}`.
 
@@ -199,10 +266,11 @@ are new, a couple behave differently, and video output is gone. Details:
 
 `Type`, every key (`Enter`, `Tab`, `Backspace`, arrows, `PageUp`/`PageDown`,
 `Home`/`End`, …) with `[@speed] [count]`, chords (`Ctrl+Shift+O`, `Alt+.`),
-`Sleep`, `Wait[+Line|+Screen][@timeout] [/re/]`, `Screenshot`, `Hide`/`Show`,
-`Require`, `Env`, `Source`, `Copy`/`Paste`, `Output .gif/.txt/.ascii/.test`,
-and `Set` for the full VHS settings list. Arrow keys respect application
-cursor mode, so vim and fzf behave.
+`Sleep`, `Wait[+Line|+Screen][@timeout] [/re/]`, `Screen`, `Screenshot`,
+`Hide`/`Show`, `Require`, `Env`, `Source`, `Copy`/`Paste`,
+`Output .gif/.png/.txt/.ascii/.test/.cast/.jsonl`, and `Set` for the full VHS
+settings list. Arrow keys respect application cursor mode, so vim and fzf
+behave.
 
 ### New
 
@@ -210,6 +278,8 @@ cursor mode, so vim and fzf behave.
 | --- | --- |
 | `Assert[+Screen\|+Line][@timeout] /re/` | fail the run (exit 1) if the pattern isn't on screen; with `@timeout` it retries until the deadline |
 | `Capture x.txt` | dump the screen as plain text, right now |
+| `Screen` | return the current screen text and cursor in JSON command detail |
+| `Output x.jsonl` | native vhs-rs timeline for later `render` |
 | `Output x.cast` | asciicast v3 event log ([asciinema](https://asciinema.org) format) |
 | `Output x.png` | final frame as a PNG |
 
@@ -275,6 +345,8 @@ All in [`examples/`](examples/), all pass `vhs-rs check`:
 - [`theme-gallery.tape`](examples/theme-gallery.tape) — several themes, one run
 - [`failure-demo.tape`](examples/failure-demo.tape) — a deliberate failure and
   the forensics it leaves behind
+- [`repl-driver.sh`](examples/repl-driver.sh) — tiny shell driver for
+  `repl --record` followed by `render`
 - [`readme.tape`](examples/readme.tape) — the GIF at the top of this page
 
 ## Credits
