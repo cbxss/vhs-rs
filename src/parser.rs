@@ -1,9 +1,10 @@
 //! Parser for the VHS-compatible tape language.
 //!
 //! Faithful port of vhs/parser/parser.go (two-token lookahead recursive
-//! descent), extended with `Assert` and `Capture`, plus a `validate` pass that
-//! rejects things VHS accepts but vhs_rs cannot execute (video outputs,
-//! mid-tape geometry changes) so `vhs_rs check` catches them before a run.
+//! descent), extended with `Assert`, `Capture`, and `Screen`, plus a
+//! `validate` pass that rejects things VHS accepts but vhs_rs cannot execute
+//! (video outputs, mid-tape geometry changes) so `vhs_rs check` catches them
+//! before a run.
 
 use crate::command::Command;
 use crate::error::ParseError;
@@ -94,6 +95,7 @@ impl<'a> Parser<'a> {
             Env => vec![self.parse_env()],
             Assert => vec![self.parse_wait_like(Assert, "Screen", true)],
             Capture => vec![self.parse_path_command(Capture, ".txt")],
+            Screen => vec![Command::new(Screen, self.cur.clone())],
             _ => {
                 self.error(
                     self.cur.clone(),
@@ -121,13 +123,11 @@ impl<'a> Parser<'a> {
 
         if self.peek.token_type == TokenType::Plus {
             self.next_token();
-            if self.peek.token_type != TokenType::String
-                || (self.peek.literal != "Line" && self.peek.literal != "Screen")
-            {
+            let Some(scope) = scope_literal(&self.peek) else {
                 self.error(self.peek.clone(), format!("{name}+ expects Line or Screen"));
                 return cmd;
-            }
-            cmd.args = self.peek.literal.clone();
+            };
+            cmd.args = scope.into();
             self.next_token();
         } else {
             cmd.args = default_scope.into();
@@ -662,6 +662,15 @@ impl<'a> Parser<'a> {
         cmd.args = path;
         self.next_token();
         cmd
+    }
+}
+
+fn scope_literal(token: &Token) -> Option<&'static str> {
+    match token.token_type {
+        TokenType::String if token.literal == "Line" => Some("Line"),
+        TokenType::String if token.literal == "Screen" => Some("Screen"),
+        TokenType::Screen => Some("Screen"),
+        _ => None,
     }
 }
 

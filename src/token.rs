@@ -1,7 +1,8 @@
 //! Token types for the VHS-compatible tape language.
 //!
-//! Ported from vhs/token/token.go, with vhs_rs extensions: `Assert`, `Capture`,
-//! and a working `Home` keyword (VHS defines the token but never wires it up).
+//! Ported from vhs/token/token.go, with vhs_rs extensions: `Assert`,
+//! `Capture`, `Screen`, and a working `Home` keyword (VHS defines the token
+//! but never wires it up).
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -97,6 +98,7 @@ pub enum TokenType {
     // vhs_rs extensions
     Assert,
     Capture,
+    Screen,
 }
 
 /// A lexer token: type, literal text, and source position (1-based line, column).
@@ -175,6 +177,7 @@ const KEYWORDS: &[(TokenType, &str)] = &[
     (TokenType::Env, "Env"),
     (TokenType::Assert, "Assert"),
     (TokenType::Capture, "Capture"),
+    (TokenType::Screen, "Screen"),
 ];
 
 static KEYWORD_LOOKUP: LazyLock<HashMap<&'static str, TokenType>> =

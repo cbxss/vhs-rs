@@ -131,6 +131,32 @@ fn success_is_exit_zero() {
     assert_eq!(r["exit_code"], 0);
 }
 
+#[test]
+fn screen_command_reports_current_screen() {
+    let dir = scratch("screen");
+    let out = run_json_in(
+        &dir,
+        "Type \"echo screen-detail\"\nEnter\nWait\nScreen\n",
+        &[],
+    );
+    let r = report(&out);
+    assert_report_invariants(&r, &out);
+    let screen = r["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["command"] == "Screen")
+        .expect("screen command");
+    assert_eq!(screen["status"], "ok");
+    assert!(
+        screen["detail"]["screen_text"]
+            .as_str()
+            .unwrap()
+            .contains("screen-detail")
+    );
+    assert!(screen["detail"]["cursor"]["row"].is_u64());
+}
+
 // ---- Child death must never masquerade as success or timeout ----------------
 
 #[test]

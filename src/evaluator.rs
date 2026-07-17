@@ -1059,6 +1059,11 @@ async fn execute(
             Ok(Some(serde_json::json!({"path": path})))
         }
 
+        Screen => {
+            let _ = session.drain();
+            Ok(Some(screen_detail(session.term())))
+        }
+
         Hide => {
             session.note_visibility(false);
             Ok(None)
@@ -1099,6 +1104,18 @@ async fn execute(
 }
 
 // ---- Wait/Assert machinery --------------------------------------------------
+
+fn screen_detail(term: &Term) -> serde_json::Value {
+    let cursor = term.cursor();
+    serde_json::json!({
+        "screen_text": term.text(),
+        "cursor": {
+            "col": cursor.col,
+            "row": cursor.row,
+            "visible": cursor.visible,
+        },
+    })
+}
 
 /// Report detail for a successful Wait/Assert match (`elapsed` only for Wait).
 fn match_detail(scope: Scope, regex: &Regex, elapsed: Option<Duration>) -> serde_json::Value {

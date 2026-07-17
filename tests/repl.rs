@@ -49,7 +49,7 @@ fn json_lines(out: &Output) -> Vec<serde_json::Value> {
 #[test]
 fn happy_path_emits_ready_term_commands_and_report() {
     let dir = scratch("happy");
-    let out = repl_in(&dir, "Type \"echo hi\"\nEnter\nWait\n", &[]);
+    let out = repl_in(&dir, "Type \"echo hi\"\nEnter\nWait\nScreen\n", &[]);
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -61,8 +61,18 @@ fn happy_path_emits_ready_term_commands_and_report() {
     assert_eq!(lines[1]["kind"], "term");
     let commands: Vec<&serde_json::Value> =
         lines.iter().filter(|v| v["kind"] == "command").collect();
-    assert_eq!(commands.len(), 3, "lines: {lines:?}");
+    assert_eq!(commands.len(), 4, "lines: {lines:?}");
     assert!(commands.iter().all(|c| c["status"] == "ok"));
+    let screen = commands
+        .iter()
+        .find(|c| c["command"] == "Screen")
+        .expect("screen response");
+    assert!(
+        screen["detail"]["screen_text"]
+            .as_str()
+            .unwrap()
+            .contains("echo hi")
+    );
     assert_eq!(lines.last().unwrap()["kind"], "report");
     assert_eq!(lines.last().unwrap()["status"], "success");
 }
