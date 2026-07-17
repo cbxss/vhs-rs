@@ -213,106 +213,12 @@ async fn run_inner(
         }
     }
 
-    let initial_theme = settings.theme.clone();
-
-    // ---- Renderer + geometry (cols/rows derive from font metrics).
-    let mut renderer = Renderer::new(settings.render.clone(), settings.theme.clone());
-    let (cols, rows) = renderer.term_size();
-    if cols < 10 || rows < 2 {
-        report.set_failure(
-            None,
-            ExitKind::Runtime.reason(),
-            format!(
-                "terminal too small: {cols}x{rows} cells (check Width/Height/Padding/FontSize)"
-            ),
-        );
-        return ExitKind::Runtime;
-    }
-
-    // ---- Spawn the session with a pinned, deterministic environment.
-    let argv = shell_argv(&settings.shell);
-    // C.UTF-8 is a glibc/musl locale; macOS doesn't ship it, and a locale
-    // that fails to resolve falls back to plain C — readline then mangles
-    // multibyte input, which surfaced as golden-tape timeouts on macOS CI.
-    let locale = if cfg!(target_os = "macos") {
-        "en_US.UTF-8"
-    } else {
-        "C.UTF-8"
-    };
-    let mut env = vec![
-        ("TERM".to_string(), "xterm-256color".to_string()),
-        ("PS1".to_string(), "> ".to_string()),
-        // Deliberately does NOT match the default WaitPattern (`>$`): bash's
-        // stock PS2 is "> ", so an unclosed quote would otherwise show a
-        // continuation prompt that `Wait` mistakes for "the prompt is back".
-        ("PS2".to_string(), "... ".to_string()),
-        ("PROMPT_COMMAND".to_string(), String::new()),
-        ("HISTFILE".to_string(), String::new()),
-        ("LANG".to_string(), locale.to_string()),
-        ("LC_ALL".to_string(), locale.to_string()),
-        // macOS bash 3.2 otherwise opens every interactive session with the
-        // "default shell is now zsh" banner, polluting the screen.
-        (
-            "BASH_SILENCE_DEPRECATION_WARNING".to_string(),
-            "1".to_string(),
-        ),
-        ("VHS_RS".to_string(), "1".to_string()),
-    ];
-    env.extend(spawn_env);
-
-    let mut session = match Session::spawn(&argv, &env, cols, rows) {
-        Ok(s) => s,
-        Err(e) => {
-            report.set_failure(
-                None,
-                ExitKind::Runtime.reason(),
-                format!("failed to spawn {argv:?}: {e}"),
-            );
-            return ExitKind::Runtime;
-        }
-    };
-    report.set_term(cols, rows, settings.shell.clone());
-
-    // Golden writer for `Output .txt/.ascii/.test` (records after every command).
-    let mut golden = txt::GoldenWriter::new();
-
-    // One owner for artifact bookkeeping: planned golden targets, written
-    // artifacts (drained into the report at the end), collision warnings,
-    // and forensics naming.
-    let mut registry = ArtifactRegistry::new(&outputs, tape_name, quiet);
-
-    // Streaming timeline recorders: every `Output x.jsonl` target plus
-    // `--record`. Created (header written) before anything runs, so even a
-    // killed run leaves a renderable file. Note the header carries the
-    // preamble settings; a mid-tape `Set PlaybackSpeed` affects this run's
-    // own GIF but not a later `render` of the recording.
-    let jsonl_targets: Vec<String> = outputs
-        .iter()
-        .filter(|(ext, _)| ext == ".jsonl")
-        .map(|(_, path)| path.clone())
-        .chain(record.map(String::from))
-        .collect();
-    let header = TimelineHeader {
-        version: TIMELINE_VERSION,
-        cols,
-        rows,
-        shell: settings.shell.clone(),
-        tape: Some(tape_name.to_string()),
-        theme: initial_theme.clone(),
-        render: settings.render.clone(),
-        cursor_blink: settings.cursor_blink,
-        max_fps: settings.max_fps,
-        playback_speed: settings.playback_speed,
-        loop_offset: settings.loop_offset,
-    };
-    let mut recorder = match Recorder::create(&jsonl_targets, &header) {
-        Ok(r) => r,
-        Err((path, e)) => {
-            report.set_failure(
-                None,
-                ExitKind::Runtime.reason(),
-                format!("failed to create timeline {path}: {e}"),
-            );
+    let mut engine = match Engine::spawn(
+        tape_name, settings, spawn_env, &outputs, record, quiet, report,
+    ) {
+        Ok(engine) => engine,
+        Err(msg) => {
+            report.set_failure(None, ExitKind::Runtime.reason(), msg);
             return ExitKind::Runtime;
         }
     };
@@ -323,16 +229,7 @@ async fn run_inner(
     // exited can never run anything: without this check a typo'd
     // `Set Shell` would sail through to a false success, because writes
     // into a dead PTY still land in the kernel buffer.
-    let initial_wait = with_deadline(
-        deadline,
-        wait_for(
-            &mut session,
-            Scope::Line,
-            &settings.wait_pattern.clone(),
-            settings.wait_timeout,
-        ),
-    )
-    .await;
+    let initial_wait = with_deadline(deadline, engine.initial_prompt_wait()).await;
     match initial_wait {
         None => {
             report.set_failure(
@@ -346,66 +243,41 @@ async fn run_inner(
             report.set_failure(
                 None,
                 "child_exited",
-                format!("shell {argv:?} exited before the tape started (bad Set Shell?)"),
+                format!(
+                    "shell {:?} exited before the tape started (bad Set Shell?)",
+                    engine.argv
+                ),
             );
             return ExitKind::Runtime;
         }
         Some(Ok(WaitOutcome::TimedOut)) | Some(Err(_)) if !quiet => {
             eprintln!(
                 "vhs-rs: warning: prompt did not match /{}/ within {:?}; continuing",
-                settings.wait_pattern.as_str(),
-                settings.wait_timeout
+                engine.settings.wait_pattern.as_str(),
+                engine.settings.wait_timeout
             );
         }
         _ => {}
     }
 
     // ---- Command loop.
-    let mut clipboard = String::new();
-    let mut theme_timeline: Vec<(Duration, Theme)> = Vec::new();
     let mut exit = ExitKind::Success;
 
     for (index, (cmd, res)) in commands.iter().zip(resolved.iter()).enumerate() {
         let step_start = Instant::now();
-        let result = with_deadline(
-            deadline,
-            execute(
-                cmd,
-                res,
-                &mut session,
-                &mut settings,
-                &mut renderer,
-                &mut clipboard,
-                &mut theme_timeline,
-                &mut registry,
-                index,
-                quiet,
-            ),
-        )
-        .await
-        .unwrap_or_else(|| {
-            Err(StepFailure {
-                exit: ExitKind::Runtime,
-                reason: Some("run_timeout"),
-                message: "--timeout exceeded; aborting the run".to_string(),
-                detail: None,
-            })
-        });
+        let result = with_deadline(deadline, engine.exec(index, cmd, res))
+            .await
+            .unwrap_or_else(|| {
+                Err(StepFailure {
+                    exit: ExitKind::Runtime,
+                    reason: Some("run_timeout"),
+                    message: "--timeout exceeded; aborting the run".to_string(),
+                    detail: None,
+                })
+            });
 
         let elapsed = step_start.elapsed();
-        if recorder.active() {
-            recorder.observe(
-                &session,
-                &theme_timeline,
-                &CommandMarker {
-                    index,
-                    line: cmd.token.line,
-                    command: cmd.to_string(),
-                    status: if result.is_ok() { "ok" } else { "failed" }.into(),
-                    elapsed_ms: elapsed.as_millis() as u64,
-                },
-            );
-        }
+        engine.record_marker(index, cmd, result.is_ok(), elapsed);
         match result {
             Ok(detail) => {
                 report.record(index, cmd, CommandStatus::Ok, elapsed, detail);
@@ -429,120 +301,333 @@ async fn run_inner(
             }
         }
 
-        if registry.has_golden_targets() {
-            // Byte-identical goldens must not depend on whether a keystroke's
-            // echo landed inside the typing-speed settle window — on a loaded
-            // machine (CI) it regularly misses. Wait for the PTY to go
-            // briefly quiet before recording the frame.
-            quiesce(
-                &mut session,
-                Duration::from_millis(25),
-                Duration::from_millis(250),
-            )
-            .await;
-            golden.record(&session.term().text());
-        }
+        engine.record_golden_frame().await;
     }
 
     // ---- Failure forensics: dump exactly what the terminal showed.
     if exit != ExitKind::Success {
-        let _ = session.drain();
-        let (text_path, png_path) = registry.forensics_paths();
-        if txt::write_capture(&text_path, &session.term().text()).is_ok() {
-            registry.record(text_path.to_string_lossy(), ArtifactKind::FailureText, None);
+        engine.write_forensics();
+    }
+
+    engine.finish(&outputs, report, &mut exit).await;
+    exit
+}
+
+/// The live execution state for one spawned session: everything a tape
+/// command can touch, shared between the batch evaluator and the repl. The
+/// batch pre-pass (settings/Env/Require before spawn) stays with the
+/// callers; the Engine takes over once the terminal exists.
+struct Engine {
+    session: Session,
+    settings: Settings,
+    renderer: Renderer,
+    /// Theme at spawn time (GIF replays start here).
+    initial_theme: Theme,
+    argv: Vec<String>,
+    cols: usize,
+    rows: usize,
+    clipboard: String,
+    theme_timeline: Vec<(Duration, Theme)>,
+    registry: ArtifactRegistry,
+    golden: txt::GoldenWriter,
+    recorder: Recorder,
+    quiet: bool,
+}
+
+impl Engine {
+    /// Builds the renderer, spawns the shell on a pinned deterministic
+    /// environment, and opens the artifact/recording machinery. Sets the
+    /// report's term info as soon as the terminal exists. `Err` carries the
+    /// user-facing failure message (the caller maps it to `runtime_error`).
+    #[allow(clippy::too_many_arguments)]
+    fn spawn(
+        tape_name: &str,
+        settings: Settings,
+        spawn_env: Vec<(String, String)>,
+        outputs: &[(String, String)],
+        record: Option<&str>,
+        quiet: bool,
+        report: &mut ReportBuilder,
+    ) -> Result<Self, String> {
+        let initial_theme = settings.theme.clone();
+
+        // ---- Renderer + geometry (cols/rows derive from font metrics).
+        let renderer = Renderer::new(settings.render.clone(), settings.theme.clone());
+        let (cols, rows) = renderer.term_size();
+        if cols < 10 || rows < 2 {
+            return Err(format!(
+                "terminal too small: {cols}x{rows} cells (check Width/Height/Padding/FontSize)"
+            ));
         }
-        let canvas = renderer.render(&session.term().snapshot());
+
+        // ---- Spawn the session with a pinned, deterministic environment.
+        let argv = shell_argv(&settings.shell);
+        // C.UTF-8 is a glibc/musl locale; macOS doesn't ship it, and a locale
+        // that fails to resolve falls back to plain C — readline then mangles
+        // multibyte input, which surfaced as golden-tape timeouts on macOS CI.
+        let locale = if cfg!(target_os = "macos") {
+            "en_US.UTF-8"
+        } else {
+            "C.UTF-8"
+        };
+        let mut env = vec![
+            ("TERM".to_string(), "xterm-256color".to_string()),
+            ("PS1".to_string(), "> ".to_string()),
+            // Deliberately does NOT match the default WaitPattern (`>$`):
+            // bash's stock PS2 is "> ", so an unclosed quote would otherwise
+            // show a continuation prompt that `Wait` mistakes for "the
+            // prompt is back".
+            ("PS2".to_string(), "... ".to_string()),
+            ("PROMPT_COMMAND".to_string(), String::new()),
+            ("HISTFILE".to_string(), String::new()),
+            ("LANG".to_string(), locale.to_string()),
+            ("LC_ALL".to_string(), locale.to_string()),
+            // macOS bash 3.2 otherwise opens every interactive session with
+            // the "default shell is now zsh" banner, polluting the screen.
+            (
+                "BASH_SILENCE_DEPRECATION_WARNING".to_string(),
+                "1".to_string(),
+            ),
+            ("VHS_RS".to_string(), "1".to_string()),
+        ];
+        env.extend(spawn_env);
+
+        let session = Session::spawn(&argv, &env, cols, rows)
+            .map_err(|e| format!("failed to spawn {argv:?}: {e}"))?;
+        report.set_term(cols, rows, settings.shell.clone());
+
+        // One owner for artifact bookkeeping: planned golden targets,
+        // written artifacts (drained into the report at the end), collision
+        // warnings, and forensics naming.
+        let registry = ArtifactRegistry::new(outputs, tape_name, quiet);
+
+        // Streaming timeline recorders: every `Output x.jsonl` target plus
+        // `--record`. Created (header written) before anything runs, so even
+        // a killed run leaves a renderable file. Note the header carries the
+        // preamble settings; a mid-tape `Set PlaybackSpeed` affects this
+        // run's own GIF but not a later `render` of the recording.
+        let jsonl_targets: Vec<String> = outputs
+            .iter()
+            .filter(|(ext, _)| ext == ".jsonl")
+            .map(|(_, path)| path.clone())
+            .chain(record.map(String::from))
+            .collect();
+        let header = TimelineHeader {
+            version: TIMELINE_VERSION,
+            cols,
+            rows,
+            shell: settings.shell.clone(),
+            tape: Some(tape_name.to_string()),
+            theme: initial_theme.clone(),
+            render: settings.render.clone(),
+            cursor_blink: settings.cursor_blink,
+            max_fps: settings.max_fps,
+            playback_speed: settings.playback_speed,
+            loop_offset: settings.loop_offset,
+        };
+        let recorder = Recorder::create(&jsonl_targets, &header)
+            .map_err(|(path, e)| format!("failed to create timeline {path}: {e}"))?;
+
+        Ok(Self {
+            session,
+            settings,
+            renderer,
+            initial_theme,
+            argv,
+            cols,
+            rows,
+            clipboard: String::new(),
+            theme_timeline: Vec::new(),
+            // Golden writer for `Output .txt/.ascii/.test` (records after
+            // every command).
+            golden: txt::GoldenWriter::new(),
+            registry,
+            recorder,
+            quiet,
+        })
+    }
+
+    /// The implicit wait for the shell prompt before the first keystroke.
+    async fn initial_prompt_wait(&mut self) -> std::io::Result<WaitOutcome> {
+        let pattern = self.settings.wait_pattern.clone();
+        wait_for(
+            &mut self.session,
+            Scope::Line,
+            &pattern,
+            self.settings.wait_timeout,
+        )
+        .await
+    }
+
+    /// Executes one command against the live session.
+    async fn exec(
+        &mut self,
+        index: usize,
+        cmd: &Command,
+        res: &Resolved,
+    ) -> Result<Option<serde_json::Value>, StepFailure> {
+        execute(
+            cmd,
+            res,
+            &mut self.session,
+            &mut self.settings,
+            &mut self.renderer,
+            &mut self.clipboard,
+            &mut self.theme_timeline,
+            &mut self.registry,
+            index,
+            self.quiet,
+        )
+        .await
+    }
+
+    /// Streams the just-finished command (events, theme changes, boundary
+    /// marker) to the timeline recorders, when any are active.
+    fn record_marker(&mut self, index: usize, cmd: &Command, ok: bool, elapsed: Duration) {
+        if !self.recorder.active() {
+            return;
+        }
+        let marker = CommandMarker {
+            index,
+            line: cmd.token.line,
+            command: cmd.to_string(),
+            status: if ok { "ok" } else { "failed" }.into(),
+            elapsed_ms: elapsed.as_millis() as u64,
+        };
+        self.recorder
+            .observe(&self.session, &self.theme_timeline, &marker);
+    }
+
+    /// Appends the post-command golden frame, when golden targets exist.
+    async fn record_golden_frame(&mut self) {
+        if !self.registry.has_golden_targets() {
+            return;
+        }
+        // Byte-identical goldens must not depend on whether a keystroke's
+        // echo landed inside the typing-speed settle window — on a loaded
+        // machine (CI) it regularly misses. Wait for the PTY to go briefly
+        // quiet before recording the frame.
+        quiesce(
+            &mut self.session,
+            Duration::from_millis(25),
+            Duration::from_millis(250),
+        )
+        .await;
+        self.golden.record(&self.session.term().text());
+    }
+
+    /// Failure forensics: dump exactly what the terminal showed.
+    fn write_forensics(&mut self) {
+        let _ = self.session.drain();
+        let (text_path, png_path) = self.registry.forensics_paths();
+        if txt::write_capture(&text_path, &self.session.term().text()).is_ok() {
+            self.registry
+                .record(text_path.to_string_lossy(), ArtifactKind::FailureText, None);
+        }
+        let canvas = self.renderer.render(&self.session.term().snapshot());
         if png::write_png(&png_path, canvas).is_ok() {
-            registry.record(png_path.to_string_lossy(), ArtifactKind::FailurePng, None);
+            self.registry
+                .record(png_path.to_string_lossy(), ArtifactKind::FailurePng, None);
         }
     }
 
-    // ---- Teardown before encoding (frees the child; events are all captured).
-    let _ = session.shutdown().await;
-    // The shutdown drain + Exit event are the timeline's final lines.
-    recorder.sync_events(&session);
+    /// Teardown and end-of-run outputs: kills the child, flushes the
+    /// recorders, encodes every `Output` target, and drains the artifact
+    /// list into the report. Encode errors are real failures (unlike VHS):
+    /// they set the report failure and flip `exit` to runtime.
+    async fn finish(
+        mut self,
+        outputs: &[(String, String)],
+        report: &mut ReportBuilder,
+        exit: &mut ExitKind,
+    ) {
+        // ---- Teardown before encoding (frees the child; events are all
+        // captured).
+        let _ = self.session.shutdown().await;
+        // The shutdown drain + Exit event are the timeline's final lines.
+        self.recorder.sync_events(&self.session);
 
-    // ---- End-of-run outputs. Encode errors are real failures (unlike VHS).
-    for (ext, path) in &outputs {
-        let result = match ext.as_str() {
-            // Already streamed while the run happened; the recorder records
-            // the artifact (and any write failure) below.
-            ".jsonl" => continue,
-            ".txt" | ".ascii" | ".test" => {
-                golden.save(Path::new(path)).map(|_| ArtifactKind::Golden)
-            }
-            ".png" => {
-                let canvas = renderer.render(&session.term().snapshot());
-                png::write_png(Path::new(path), canvas).map(|_| ArtifactKind::Png)
-            }
-            ".gif" => {
-                let spec = ReplaySpec {
-                    max_fps: settings.max_fps,
-                    playback_speed: settings.playback_speed,
-                    loop_offset: settings.loop_offset,
-                    cursor_blink: settings.cursor_blink,
-                    initial_theme: initial_theme.clone(),
-                    theme_timeline: theme_timeline.clone(),
-                };
-                // Hide→Show wall time is cut, not frozen: without this the
-                // pre-Hide frame inherits the whole hidden span as its delay
-                // (VHS cuts hidden sections; so do we).
-                let events = crate::timeline::collapse_hidden(session.events());
-                let result = replay::encode_gif(
+        for (ext, path) in outputs {
+            let result = match ext.as_str() {
+                // Already streamed while the run happened; the recorder
+                // records the artifact (and any write failure) below.
+                ".jsonl" => continue,
+                ".txt" | ".ascii" | ".test" => self
+                    .golden
+                    .save(Path::new(path))
+                    .map(|_| ArtifactKind::Golden),
+                ".png" => {
+                    let canvas = self.renderer.render(&self.session.term().snapshot());
+                    png::write_png(Path::new(path), canvas).map(|_| ArtifactKind::Png)
+                }
+                ".gif" => {
+                    let spec = ReplaySpec {
+                        max_fps: self.settings.max_fps,
+                        playback_speed: self.settings.playback_speed,
+                        loop_offset: self.settings.loop_offset,
+                        cursor_blink: self.settings.cursor_blink,
+                        initial_theme: self.initial_theme.clone(),
+                        theme_timeline: self.theme_timeline.clone(),
+                    };
+                    // Hide→Show wall time is cut, not frozen: without this
+                    // the pre-Hide frame inherits the whole hidden span as
+                    // its delay (VHS cuts hidden sections; so do we).
+                    let events = crate::timeline::collapse_hidden(self.session.events());
+                    let result = replay::encode_gif(
+                        Path::new(path),
+                        &spec,
+                        &mut self.renderer,
+                        &events,
+                        (self.cols, self.rows),
+                    );
+                    // The replay leaves the renderer on the timeline's last
+                    // theme; later renders (Output .png, forensics) must use
+                    // the run's final theme.
+                    self.renderer.set_theme(self.settings.theme.clone());
+                    result.map(|_| ArtifactKind::Gif)
+                }
+                ".cast" => cast::write_cast(
                     Path::new(path),
-                    &spec,
-                    &mut renderer,
-                    &events,
-                    (cols, rows),
-                );
-                // The replay leaves the renderer on the timeline's last
-                // theme; later renders (Output .png, forensics) must use the
-                // run's final theme.
-                renderer.set_theme(settings.theme.clone());
-                result.map(|_| ArtifactKind::Gif)
-            }
-            ".cast" => cast::write_cast(
-                Path::new(path),
-                &cast::CastMeta {
-                    cols,
-                    rows,
-                    command: Some(settings.shell.clone()),
-                    title: None,
-                    env: vec![("TERM".into(), "xterm-256color".into())],
-                },
-                session.events(),
-            )
-            .map(|_| ArtifactKind::Cast),
-            other => {
-                // validate() should have caught this; belt and braces.
-                report.set_failure(
-                    None,
-                    ExitKind::Runtime.reason(),
-                    format!("unsupported output {other}"),
-                );
-                exit = ExitKind::Runtime;
-                continue;
-            }
-        };
+                    &cast::CastMeta {
+                        cols: self.cols,
+                        rows: self.rows,
+                        command: Some(self.settings.shell.clone()),
+                        title: None,
+                        env: vec![("TERM".into(), "xterm-256color".into())],
+                    },
+                    self.session.events(),
+                )
+                .map(|_| ArtifactKind::Cast),
+                other => {
+                    // validate() should have caught this; belt and braces.
+                    report.set_failure(
+                        None,
+                        ExitKind::Runtime.reason(),
+                        format!("unsupported output {other}"),
+                    );
+                    *exit = ExitKind::Runtime;
+                    continue;
+                }
+            };
 
-        match result {
-            Ok(kind) => registry.record(path.clone(), kind, None),
-            Err(e) => {
-                report.set_failure(
-                    None,
-                    ExitKind::Runtime.reason(),
-                    format!("failed to write {path}: {e}"),
-                );
-                if exit == ExitKind::Success {
-                    exit = ExitKind::Runtime;
+            match result {
+                Ok(kind) => self.registry.record(path.clone(), kind, None),
+                Err(e) => {
+                    report.set_failure(
+                        None,
+                        ExitKind::Runtime.reason(),
+                        format!("failed to write {path}: {e}"),
+                    );
+                    if *exit == ExitKind::Success {
+                        *exit = ExitKind::Runtime;
+                    }
                 }
             }
         }
-    }
 
-    recorder.finish(&mut registry, report, &mut exit);
-    registry.drain_into(report);
-    exit
+        self.recorder.finish(&mut self.registry, report, exit);
+        self.registry.drain_into(report);
+    }
 }
 
 /// The set of live timeline writers for one run (`Output x.jsonl` targets +
