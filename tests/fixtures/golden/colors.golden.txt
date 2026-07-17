@@ -117,7 +117,7 @@ txt run.sh && chmod +x run.sh
 ────────────────────────────────────────────────────────────────────────────────
 > cd "$(mktemp -d)" && mkdir sub && touch plain.
 txt run.sh && chmod +x run.sh
-> ls --color=always
+> ls -1 --color=always
 
 
 
@@ -130,79 +130,79 @@ txt run.sh && chmod +x run.sh
 ────────────────────────────────────────────────────────────────────────────────
 > cd "$(mktemp -d)" && mkdir sub && touch plain.
 txt run.sh && chmod +x run.sh
-> ls --color=always
-plain.txt  run.sh  sub
+> ls -1 --color=always
+plain.txt
+run.sh
+sub
 >
 
 
 
 
 
-
-
 ────────────────────────────────────────────────────────────────────────────────
 > cd "$(mktemp -d)" && mkdir sub && touch plain.
 txt run.sh && chmod +x run.sh
-> ls --color=always
-plain.txt  run.sh  sub
+> ls -1 --color=always
+plain.txt
+run.sh
+sub
 >
 
 
 
 
 
-
-
 ────────────────────────────────────────────────────────────────────────────────
 > cd "$(mktemp -d)" && mkdir sub && touch plain.
 txt run.sh && chmod +x run.sh
-> ls --color=always
-plain.txt  run.sh  sub
+> ls -1 --color=always
+plain.txt
+run.sh
+sub
 > printf '\e[31mred\e[0m \e[1;32mbold-green\e[0m
  \e[44mblue-bg\e[0m\n'
 
 
 
 
-
-
 ────────────────────────────────────────────────────────────────────────────────
 > cd "$(mktemp -d)" && mkdir sub && touch plain.
 txt run.sh && chmod +x run.sh
-> ls --color=always
-plain.txt  run.sh  sub
-> printf '\e[31mred\e[0m \e[1;32mbold-green\e[0m
- \e[44mblue-bg\e[0m\n'
-red bold-green blue-bg
->
-
-
-
-
-────────────────────────────────────────────────────────────────────────────────
-> cd "$(mktemp -d)" && mkdir sub && touch plain.
-txt run.sh && chmod +x run.sh
-> ls --color=always
-plain.txt  run.sh  sub
+> ls -1 --color=always
+plain.txt
+run.sh
+sub
 > printf '\e[31mred\e[0m \e[1;32mbold-green\e[0m
  \e[44mblue-bg\e[0m\n'
 red bold-green blue-bg
 >
 
 
-
-
 ────────────────────────────────────────────────────────────────────────────────
 > cd "$(mktemp -d)" && mkdir sub && touch plain.
 txt run.sh && chmod +x run.sh
-> ls --color=always
-plain.txt  run.sh  sub
+> ls -1 --color=always
+plain.txt
+run.sh
+sub
 > printf '\e[31mred\e[0m \e[1;32mbold-green\e[0m
  \e[44mblue-bg\e[0m\n'
 red bold-green blue-bg
 >
 
 
+────────────────────────────────────────────────────────────────────────────────
+> cd "$(mktemp -d)" && mkdir sub && touch plain.
+txt run.sh && chmod +x run.sh
+> ls -1 --color=always
+plain.txt
+run.sh
+sub
+> printf '\e[31mred\e[0m \e[1;32mbold-green\e[0m
+ \e[44mblue-bg\e[0m\n'
+red bold-green blue-bg
+>
 
 
 ────────────────────────────────────────────────────────────────────────────────
