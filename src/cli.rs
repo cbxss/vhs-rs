@@ -53,6 +53,10 @@ enum Cmd {
     /// executing anything
     #[command(after_help = EXIT_CODES_HELP)]
     Render(RenderArgs),
+
+    /// Drive a persistent PTY with one tape-language line at a time
+    #[command(after_help = EXIT_CODES_HELP)]
+    Repl(ReplArgs),
 }
 
 #[derive(Args)]
@@ -116,6 +120,25 @@ struct RunArgs {
     record: Option<String>,
 }
 
+#[derive(Args)]
+struct ReplArgs {
+    /// Abort the session on the first failed command
+    #[arg(long)]
+    strict: bool,
+
+    /// Suppress warnings and progress output (protocol JSON still goes to stdout)
+    #[arg(long)]
+    quiet: bool,
+
+    /// Whole-session wall-clock budget (e.g. 30s, 2m)
+    #[arg(long, value_parser = parse_timeout)]
+    timeout: Option<Duration>,
+
+    /// Stream the session to a .jsonl timeline as it runs
+    #[arg(long, value_name = "PATH")]
+    record: Option<String>,
+}
+
 fn parse_timeout(s: &str) -> Result<Duration, String> {
     crate::util::parse_duration(s)
         .ok_or_else(|| format!("invalid duration {s:?} (examples: 500ms, 30s, 2m)"))
@@ -154,6 +177,12 @@ pub fn main() -> i32 {
             framerate: args.framerate,
             font_size: args.font_size,
             quiet: args.quiet,
+        }),
+        Some(Cmd::Repl(args)) => crate::repl::repl(&crate::repl::ReplRequest {
+            strict: args.strict,
+            quiet: args.quiet,
+            timeout: args.timeout,
+            record: args.record,
         }),
         None => run(cli.run),
     }

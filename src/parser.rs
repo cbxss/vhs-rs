@@ -674,7 +674,7 @@ const SUPPORTED_OUTPUTS: &[&str] = &[".gif", ".png", ".txt", ".ascii", ".test", 
 
 /// Settings that may change mid-tape (everything else is frozen once the
 /// terminal has spawned, because canvas geometry is fixed).
-fn is_runtime_setting(name: &str) -> bool {
+pub(crate) fn is_runtime_setting(name: &str) -> bool {
     matches!(
         name,
         "TypingSpeed" | "WaitTimeout" | "WaitPattern" | "PlaybackSpeed" | "Theme"

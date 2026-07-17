@@ -30,11 +30,11 @@ use std::time::{Duration, Instant};
 use tokio::signal::unix::{SignalKind, signal};
 
 /// Everything `Set` can configure, with VHS defaults.
-struct Settings {
-    shell: String,
+pub(crate) struct Settings {
+    pub(crate) shell: String,
     typing_speed: Duration,
-    wait_timeout: Duration,
-    wait_pattern: Regex,
+    pub(crate) wait_timeout: Duration,
+    pub(crate) wait_pattern: Regex,
     playback_speed: f64,
     max_fps: f64,
     cursor_blink: bool,
@@ -63,17 +63,17 @@ impl Default for Settings {
 /// Outcome of a single failed step, mapped to the exit taxonomy. The report
 /// `reason` derives from `exit` ([`ExitKind::reason`]) unless `reason`
 /// overrides it with a more specific taxonomy entry (e.g. `child_exited`).
-struct StepFailure {
-    exit: ExitKind,
-    reason: Option<&'static str>,
-    message: String,
-    detail: Option<serde_json::Value>,
+pub(crate) struct StepFailure {
+    pub(crate) exit: ExitKind,
+    pub(crate) reason: Option<&'static str>,
+    pub(crate) message: String,
+    pub(crate) detail: Option<serde_json::Value>,
 }
 
 /// What ended a [`wait_for`]: the pattern matched, the deadline passed, or
 /// the child exited (and the pattern can never match).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WaitOutcome {
+pub(crate) enum WaitOutcome {
     Matched,
     TimedOut,
     ChildExited,
@@ -317,7 +317,7 @@ async fn run_inner(
 /// command can touch, shared between the batch evaluator and the repl. The
 /// batch pre-pass (settings/Env/Require before spawn) stays with the
 /// callers; the Engine takes over once the terminal exists.
-struct Engine {
+pub(crate) struct Engine {
     session: Session,
     settings: Settings,
     renderer: Renderer,
@@ -340,7 +340,7 @@ impl Engine {
     /// report's term info as soon as the terminal exists. `Err` carries the
     /// user-facing failure message (the caller maps it to `runtime_error`).
     #[allow(clippy::too_many_arguments)]
-    fn spawn(
+    pub(crate) fn spawn(
         tape_name: &str,
         settings: Settings,
         spawn_env: Vec<(String, String)>,
@@ -448,7 +448,7 @@ impl Engine {
     }
 
     /// The implicit wait for the shell prompt before the first keystroke.
-    async fn initial_prompt_wait(&mut self) -> std::io::Result<WaitOutcome> {
+    pub(crate) async fn initial_prompt_wait(&mut self) -> std::io::Result<WaitOutcome> {
         let pattern = self.settings.wait_pattern.clone();
         wait_for(
             &mut self.session,
@@ -460,7 +460,7 @@ impl Engine {
     }
 
     /// Executes one command against the live session.
-    async fn exec(
+    pub(crate) async fn exec(
         &mut self,
         index: usize,
         cmd: &Command,
@@ -483,7 +483,13 @@ impl Engine {
 
     /// Streams the just-finished command (events, theme changes, boundary
     /// marker) to the timeline recorders, when any are active.
-    fn record_marker(&mut self, index: usize, cmd: &Command, ok: bool, elapsed: Duration) {
+    pub(crate) fn record_marker(
+        &mut self,
+        index: usize,
+        cmd: &Command,
+        ok: bool,
+        elapsed: Duration,
+    ) {
         if !self.recorder.active() {
             return;
         }
@@ -499,7 +505,7 @@ impl Engine {
     }
 
     /// Appends the post-command golden frame, when golden targets exist.
-    async fn record_golden_frame(&mut self) {
+    pub(crate) async fn record_golden_frame(&mut self) {
         if !self.registry.has_golden_targets() {
             return;
         }
@@ -517,7 +523,7 @@ impl Engine {
     }
 
     /// Failure forensics: dump exactly what the terminal showed.
-    fn write_forensics(&mut self) {
+    pub(crate) fn write_forensics(&mut self) {
         let _ = self.session.drain();
         let (text_path, png_path) = self.registry.forensics_paths();
         if txt::write_capture(&text_path, &self.session.term().text()).is_ok() {
@@ -535,7 +541,7 @@ impl Engine {
     /// recorders, encodes every `Output` target, and drains the artifact
     /// list into the report. Encode errors are real failures (unlike VHS):
     /// they set the report failure and flip `exit` to runtime.
-    async fn finish(
+    pub(crate) async fn finish(
         mut self,
         outputs: &[(String, String)],
         report: &mut ReportBuilder,
@@ -628,6 +634,67 @@ impl Engine {
         self.recorder.finish(&mut self.registry, report, exit);
         self.registry.drain_into(report);
     }
+
+    pub(crate) fn argv(&self) -> &[String] {
+        &self.argv
+    }
+
+    pub(crate) fn term_info(&self) -> (usize, usize, String) {
+        (self.cols, self.rows, self.settings.shell.clone())
+    }
+
+    pub(crate) fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    pub(crate) fn exited(&self) -> bool {
+        self.session.exited()
+    }
+
+    pub(crate) fn drain(&mut self) -> std::io::Result<bool> {
+        let changed = self.session.drain()?;
+        if changed {
+            self.recorder.sync_events(&self.session);
+        }
+        Ok(changed)
+    }
+
+    pub(crate) async fn wait_change(&mut self, deadline: Duration) -> std::io::Result<bool> {
+        let changed = self.session.wait_change(deadline).await?;
+        if changed {
+            let _ = self.session.drain()?;
+            self.recorder.sync_events(&self.session);
+        }
+        Ok(changed)
+    }
+
+    pub(crate) fn add_timeline_output(
+        &mut self,
+        tape_name: &str,
+        path: &str,
+    ) -> Result<(), String> {
+        let header = TimelineHeader {
+            version: TIMELINE_VERSION,
+            cols: self.cols,
+            rows: self.rows,
+            shell: self.settings.shell.clone(),
+            tape: Some(tape_name.to_string()),
+            theme: self.initial_theme.clone(),
+            render: self.settings.render.clone(),
+            cursor_blink: self.settings.cursor_blink,
+            max_fps: self.settings.max_fps,
+            playback_speed: self.settings.playback_speed,
+            loop_offset: self.settings.loop_offset,
+        };
+        self.recorder
+            .add(
+                path.to_string(),
+                &header,
+                &self.session,
+                &self.theme_timeline,
+            )
+            .map_err(|e| format!("failed to create timeline {path}: {e}"))
+    }
 }
 
 /// The set of live timeline writers for one run (`Output x.jsonl` targets +
@@ -661,6 +728,22 @@ impl Recorder {
 
     fn active(&self) -> bool {
         !self.writers.is_empty()
+    }
+
+    fn add(
+        &mut self,
+        path: String,
+        header: &TimelineHeader,
+        session: &Session,
+        theme_timeline: &[(Duration, Theme)],
+    ) -> std::io::Result<()> {
+        let mut writer = TimelineWriter::create(Path::new(&path), header)?;
+        writer.sync(session.events())?;
+        for (time, theme) in theme_timeline {
+            writer.write_theme(*time, theme)?;
+        }
+        self.writers.push((path, writer));
+        Ok(())
     }
 
     /// Streams everything new since the last call: session events, theme
@@ -1160,7 +1243,7 @@ fn mouse_reporting_enabled(events: &[SessionEvent]) -> bool {
 
 // ---- Settings -------------------------------------------------------------------
 
-fn apply_setting(settings: &mut Settings, cmd: &Command, quiet: bool) {
+pub(crate) fn apply_setting(settings: &mut Settings, cmd: &Command, quiet: bool) {
     let v = cmd.args.as_str();
     let warn = |msg: String| {
         if !quiet {
@@ -1299,7 +1382,7 @@ fn shell_argv(shell: &str) -> Vec<String> {
 /// Finds `bin` on `env_path` (the child's `Env PATH` override) or the
 /// inherited PATH. Only executable regular files count — a data file that
 /// happens to share the binary's name must not satisfy `Require`.
-fn which(bin: &str, env_path: Option<&str>) -> Option<PathBuf> {
+pub(crate) fn which(bin: &str, env_path: Option<&str>) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let path = env_path
         .map(std::ffi::OsString::from)
