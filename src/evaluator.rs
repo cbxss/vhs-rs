@@ -484,11 +484,15 @@ async fn run_inner(
                     initial_theme: initial_theme.clone(),
                     theme_timeline: theme_timeline.clone(),
                 };
+                // Hide→Show wall time is cut, not frozen: without this the
+                // pre-Hide frame inherits the whole hidden span as its delay
+                // (VHS cuts hidden sections; so do we).
+                let events = crate::timeline::collapse_hidden(session.events());
                 let result = replay::encode_gif(
                     Path::new(path),
                     &spec,
                     &mut renderer,
-                    session.events(),
+                    &events,
                     (cols, rows),
                 );
                 // The replay leaves the renderer on the timeline's last

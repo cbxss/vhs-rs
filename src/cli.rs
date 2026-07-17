@@ -48,6 +48,48 @@ enum Cmd {
     /// Parse and validate a tape without executing it
     #[command(after_help = EXIT_CODES_HELP)]
     Check(CheckArgs),
+
+    /// Render artifacts from a recorded timeline (.jsonl or .cast) without
+    /// executing anything
+    #[command(after_help = EXIT_CODES_HELP)]
+    Render(RenderArgs),
+}
+
+#[derive(Args)]
+struct RenderArgs {
+    /// Recorded timeline: a vhs-rs .jsonl or an asciicast .cast (v2/v3)
+    input: String,
+
+    /// Output path, repeatable; the extension picks the format
+    /// (.gif, .png, .txt, .cast)
+    #[arg(short, long = "output", value_name = "PATH", required = true)]
+    output: Vec<String>,
+
+    /// Theme override: builtin name or inline JSON (mutes recorded mid-run
+    /// theme changes)
+    #[arg(long)]
+    theme: Option<String>,
+
+    /// Cap silent gaps between events (e.g. 2s) — agent thinking pauses
+    /// stop being GIF freeze-frames
+    #[arg(long, value_parser = parse_timeout, value_name = "DURATION")]
+    idle_limit: Option<Duration>,
+
+    /// Playback speed multiplier (delays divided by this)
+    #[arg(long)]
+    speed: Option<f64>,
+
+    /// GIF frame-rate cap (max 50)
+    #[arg(long)]
+    framerate: Option<f64>,
+
+    /// Font size override (the canvas re-derives from the recorded grid)
+    #[arg(long)]
+    font_size: Option<f32>,
+
+    /// Suppress warnings and progress output (errors are still printed)
+    #[arg(long)]
+    quiet: bool,
 }
 
 #[derive(Args)]
@@ -103,6 +145,16 @@ pub fn main() -> i32 {
     match cli.command {
         Some(Cmd::Run(args)) => run(args),
         Some(Cmd::Check(args)) => check(args),
+        Some(Cmd::Render(args)) => crate::cmd_render::render(&crate::cmd_render::RenderRequest {
+            input: args.input,
+            outputs: args.output,
+            theme: args.theme,
+            idle_limit: args.idle_limit,
+            speed: args.speed,
+            framerate: args.framerate,
+            font_size: args.font_size,
+            quiet: args.quiet,
+        }),
         None => run(cli.run),
     }
 }

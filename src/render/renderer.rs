@@ -232,6 +232,27 @@ impl Renderer {
         }
     }
 
+    /// A renderer whose canvas is sized to fit a `cols × rows` grid — the
+    /// inverse of [`Renderer::term_size`]. `opts.width`/`opts.height` are
+    /// ignored and recomputed from the grid, padding, margin, and window
+    /// bar. Recorded timelines carry the authoritative grid; the canvas
+    /// derives from it, so a font-metrics change across versions can alter
+    /// output pixel dimensions but never the replayed content.
+    pub fn for_grid(mut opts: RenderOptions, theme: Theme, cols: usize, rows: usize) -> Self {
+        let fonts = FontSet::new(opts.font_size);
+        let metrics = fonts.metrics(opts.line_height, opts.letter_spacing);
+        let bar = if opts.window_bar.is_some() {
+            opts.window_bar_size
+        } else {
+            0
+        };
+        opts.width =
+            (cols as f32 * metrics.cell_w).ceil() as usize + 2 * (opts.padding + opts.margin);
+        opts.height =
+            (rows as f32 * metrics.cell_h).ceil() as usize + bar + 2 * (opts.padding + opts.margin);
+        Self::new(opts, theme)
+    }
+
     pub fn options(&self) -> &RenderOptions {
         &self.opts
     }
@@ -918,6 +939,31 @@ mod tests {
             stats.frames_written
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn for_grid_inverts_term_size() {
+        let theme = default_theme();
+        for (cols, rows) in [(77, 21), (80, 24), (20, 5), (132, 43)] {
+            for opts in [
+                RenderOptions::default(),
+                RenderOptions {
+                    window_bar: Some(BarStyle::Colorful),
+                    margin: 12,
+                    padding: 30,
+                    font_size: 16.0,
+                    ..RenderOptions::default()
+                },
+            ] {
+                let r = Renderer::for_grid(opts, theme.clone(), cols, rows);
+                assert_eq!(
+                    r.term_size(),
+                    (cols, rows),
+                    "grid {cols}x{rows} opts {:?}",
+                    r.options()
+                );
+            }
+        }
     }
 
     #[test]

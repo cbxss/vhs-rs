@@ -312,4 +312,73 @@ mod tests {
             std::fs::remove_file(path(run)).ok();
         }
     }
+
+    /// Regression: hidden (Hide→Show) wall time used to play back as a
+    /// freeze-frame — no frames are pushed while hidden, so the pre-Hide
+    /// frame's delay swallowed the whole hidden span. The fix is
+    /// `timeline::collapse_hidden` applied before every GIF encode; this
+    /// test pins both the broken raw behavior and the fixed pipeline.
+    #[test]
+    fn hidden_spans_are_cut_not_frozen() {
+        let at = |ms: u64, kind: SessionEventKind| SessionEvent {
+            time: Duration::from_millis(ms),
+            kind,
+        };
+        let events = vec![
+            at(0, SessionEventKind::Output("a".into())),
+            at(100, SessionEventKind::Visibility(false)),
+            at(3000, SessionEventKind::Output("hidden setup".into())),
+            at(9000, SessionEventKind::Visibility(true)),
+            at(9100, SessionEventKind::Output("b".into())),
+            at(9200, SessionEventKind::Exit),
+        ];
+
+        let render = RenderOptions {
+            width: 200,
+            height: 100,
+            padding: 10,
+            font_size: 16.0,
+            ..RenderOptions::default()
+        };
+        let spec = ReplaySpec {
+            max_fps: 50.0,
+            playback_speed: 1.0,
+            loop_offset: None,
+            cursor_blink: false, // no synthesized frames: delays are pure gaps
+            initial_theme: theme::default_theme(),
+            theme_timeline: Vec::new(),
+        };
+        let mut renderer = Renderer::new(render, theme::default_theme());
+
+        let decode_delays = |path: &std::path::Path| {
+            let mut options = ::gif::DecodeOptions::new();
+            options.set_color_output(::gif::ColorOutput::RGBA);
+            let mut decoder = options
+                .read_info(std::fs::File::open(path).unwrap())
+                .unwrap();
+            let mut delays = Vec::new();
+            while let Some(frame) = decoder.read_next_frame().unwrap() {
+                delays.push(frame.delay);
+            }
+            delays
+        };
+        let tmp = |name: &str| {
+            std::env::temp_dir().join(format!("vhs_rs-hide-{}-{name}.gif", std::process::id()))
+        };
+
+        // Raw events: the frame at t=0 holds until t=9100 — a 9.1s freeze.
+        let raw = tmp("raw");
+        encode_gif(&raw, &spec, &mut renderer, &events, (16, 5)).unwrap();
+        assert_eq!(decode_delays(&raw), vec![910, 100]);
+
+        // Collapsed (what every GIF encode now feeds): the hidden 8.9s is
+        // gone; "b" appears 200ms of visible time after "a".
+        let fixed = tmp("fixed");
+        let collapsed = crate::timeline::collapse_hidden(&events);
+        encode_gif(&fixed, &spec, &mut renderer, &collapsed, (16, 5)).unwrap();
+        assert_eq!(decode_delays(&fixed), vec![20, 100]);
+
+        std::fs::remove_file(&raw).ok();
+        std::fs::remove_file(&fixed).ok();
+    }
 }
