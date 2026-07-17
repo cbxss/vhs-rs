@@ -50,3 +50,29 @@ jobs:
             echo "== $tape"
             ./target/release/vhs-rs check "$tape"
           done
+
+  # The PTY layer (forkpty, EIO-vs-EOF on the master, waitpid) is the
+  # platform-sensitive core, and releases ship aarch64-apple-darwin — so the
+  # full suite must actually run on macOS, not just build there.
+  test-macos:
+    name: Build & test (macos)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Test
+        run: cargo test

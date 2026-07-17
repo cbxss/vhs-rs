@@ -6,15 +6,24 @@
 //! is mapped to EOF (`Ok(0)`) — that is how Linux reports "child gone" on a
 //! PTY master.
 //!
+//! Fork safety: everything the child needs to exec — argv, the merged
+//! environment, the PATH-resolved candidate paths, and the raw pointer
+//! tables for `execve` — is allocated in [`ExecImage::prepare`] BEFORE
+//! `forkpty`. Between fork and exec only async-signal-safe calls are made
+//! (`signal`, `execve`, `_exit`): if the parent process has other threads,
+//! any lock they hold at fork time (malloc, the env lock) is copied into
+//! the child in a locked state, and touching it would deadlock.
+//!
 //! Lifecycle guarantees:
 //! - [`Pty::shutdown`] terminates gracefully: SIGTERM, up to ~2s of polling,
 //!   then SIGKILL + reap.
 //! - [`Drop`] is a best-effort SIGKILL + blocking reap, so no zombie children
 //!   survive even on panic/error paths.
 
-use std::ffi::CString;
+use std::ffi::{CString, OsStr, OsString};
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::time::Duration;
 
 use nix::errno::Errno;
@@ -47,16 +56,18 @@ pub struct Pty {
 }
 
 impl Pty {
-    /// Forks a child running `command` (via `execvp`, so `command[0]` is
-    /// looked up on `PATH`) on a fresh PTY of `winsize = (cols, rows)`, with
-    /// `env` applied on top of the inherited environment.
+    /// Forks a child running `command` (`command[0]` is looked up on `PATH`,
+    /// execvp-style, unless it contains `/`) on a fresh PTY of
+    /// `winsize = (cols, rows)`, with `env` applied on top of the inherited
+    /// environment.
     ///
     /// Must be called from within a tokio runtime (the master fd registers
     /// with the reactor).
     ///
     /// # Errors
-    /// Returns `InvalidInput` for an empty `command`, or any OS error from
-    /// `forkpty`, setting the master nonblocking, or reactor registration.
+    /// Returns `InvalidInput` for an empty `command` or a NUL byte in any
+    /// argument or environment entry, or any OS error from `forkpty`,
+    /// setting the master nonblocking, or reactor registration.
     pub fn spawn(
         command: &[String],
         env: &[(String, String)],
@@ -65,6 +76,9 @@ impl Pty {
         if command.is_empty() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty command"));
         }
+
+        // Everything the child touches is allocated before the fork.
+        let image = ExecImage::prepare(command, env)?;
 
         let (cols, rows) = winsize;
         let ws = Winsize {
@@ -86,7 +100,7 @@ impl Pty {
                 })
             }
 
-            ForkptyResult::Child => exec_child(command, env),
+            ForkptyResult::Child => image.exec(),
         }
     }
 
@@ -239,27 +253,114 @@ impl Drop for Pty {
     }
 }
 
-/// Child-side setup after fork: apply env, restore default SIGPIPE, exec.
-/// Never returns; exits 127 if exec fails (shell convention).
-fn exec_child(command: &[String], env: &[(String, String)]) -> ! {
-    for (k, v) in env {
-        // Safety: single-threaded child between fork and exec.
-        unsafe { std::env::set_var(k, v) };
+/// Fallback PATH when neither the overrides nor the inherited environment
+/// define one (mirrors the spirit of execvp's confstr default).
+const DEFAULT_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+
+/// Everything the child needs to exec, fully allocated before `forkpty`:
+/// argv, the merged environment, the execvp-style PATH candidates, and the
+/// NULL-terminated pointer tables `execve` consumes. The child side —
+/// [`ExecImage::exec`] — makes only async-signal-safe calls.
+struct ExecImage {
+    /// Candidate executable paths, tried in order. A `command[0]` containing
+    /// `/` yields exactly one; otherwise one per PATH entry.
+    candidates: Vec<CString>,
+    /// Owning storage for the strings the pointer tables reference. The
+    /// `CString` heap buffers never move, so the pointers stay valid for the
+    /// life of the image.
+    _argv: Vec<CString>,
+    _envp: Vec<CString>,
+    argv_ptrs: Vec<*const libc::c_char>,
+    envp_ptrs: Vec<*const libc::c_char>,
+}
+
+impl ExecImage {
+    fn prepare(command: &[String], env: &[(String, String)]) -> io::Result<Self> {
+        let argv: Vec<CString> = command
+            .iter()
+            .map(|s| cstring(s.as_bytes(), "argument"))
+            .collect::<io::Result<_>>()?;
+
+        // Merged environment: inherited, with `env` overrides applied on top
+        // (later overrides win, matching the old set_var loop).
+        let mut merged: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+        for (k, v) in env {
+            let key = OsStr::new(k);
+            match merged.iter_mut().find(|(mk, _)| mk == key) {
+                Some(slot) => slot.1 = v.into(),
+                None => merged.push((k.into(), v.into())),
+            }
+        }
+
+        let envp: Vec<CString> = merged
+            .iter()
+            .map(|(k, v)| {
+                let mut kv = k.as_bytes().to_vec();
+                kv.push(b'=');
+                kv.extend_from_slice(v.as_bytes());
+                cstring(&kv, "environment entry")
+            })
+            .collect::<io::Result<_>>()?;
+
+        // execvp-style PATH resolution, done up front. The child just tries
+        // each candidate in order; a nonexistent one fails with ENOENT and
+        // the loop moves on, exactly like execvp.
+        let name = command[0].as_str();
+        let candidates: Vec<CString> = if name.contains('/') {
+            vec![cstring(name.as_bytes(), "command")?]
+        } else {
+            let path = merged
+                .iter()
+                .find(|(k, _)| k == "PATH")
+                .map_or_else(|| OsString::from(DEFAULT_PATH), |(_, v)| v.clone());
+            std::env::split_paths(&path)
+                .map(|dir| cstring(dir.join(name).as_os_str().as_bytes(), "command path"))
+                .collect::<io::Result<_>>()?
+        };
+
+        let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|c| c.as_ptr()).collect();
+        argv_ptrs.push(std::ptr::null());
+        let mut envp_ptrs: Vec<*const libc::c_char> = envp.iter().map(|c| c.as_ptr()).collect();
+        envp_ptrs.push(std::ptr::null());
+
+        Ok(Self {
+            candidates,
+            _argv: argv,
+            _envp: envp,
+            argv_ptrs,
+            envp_ptrs,
+        })
     }
 
-    let _ = unsafe { signal::signal(Signal::SIGPIPE, SigHandler::SigDfl) };
+    /// Child-side after fork: restore default SIGPIPE, exec the first
+    /// candidate that works. Never returns; exits 127 if all fail (shell
+    /// convention). Only async-signal-safe calls — no allocation, no env
+    /// access.
+    fn exec(&self) -> ! {
+        let _ = unsafe { signal::signal(Signal::SIGPIPE, SigHandler::SigDfl) };
 
-    let args: Vec<CString> = match command
-        .iter()
-        .map(|s| CString::new(s.as_str()))
-        .collect::<Result<_, _>>()
-    {
-        Ok(args) => args,
-        Err(_) => unsafe { libc::_exit(127) },
-    };
+        for path in &self.candidates {
+            // Only returns on failure; try the next PATH candidate.
+            unsafe {
+                libc::execve(
+                    path.as_ptr(),
+                    self.argv_ptrs.as_ptr(),
+                    self.envp_ptrs.as_ptr(),
+                )
+            };
+        }
 
-    let _ = unistd::execvp(&args[0], &args);
-    unsafe { libc::_exit(127) }
+        unsafe { libc::_exit(127) }
+    }
+}
+
+fn cstring(bytes: &[u8], what: &str) -> io::Result<CString> {
+    CString::new(bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("NUL byte in {what}: {:?}", String::from_utf8_lossy(bytes)),
+        )
+    })
 }
 
 fn set_nonblocking(fd: &OwnedFd) -> io::Result<()> {
@@ -340,6 +441,54 @@ mod tests {
         assert_eq!(pty.try_wait().unwrap(), None);
         let status = pty.shutdown().await.unwrap();
         assert!(status.is_some());
+    }
+
+    #[tokio::test]
+    async fn bare_names_resolve_via_path() {
+        let pty = Pty::spawn(&cmd(&["sh", "-c", "printf via-path"]), &[], (80, 24)).unwrap();
+
+        let output = read_to_eof(&pty).await;
+        assert!(output.contains("via-path"), "output: {output:?}");
+    }
+
+    #[tokio::test]
+    async fn env_path_override_governs_resolution() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // A bare name must resolve against the PATH the child will see (the
+        // override), not the parent's.
+        let dir = std::env::temp_dir().join(format!("vhs_rs-pty-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("vhs-rs-test-marker");
+        std::fs::write(&bin, "#!/bin/sh\nprintf from-override\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let env = vec![("PATH".to_string(), dir.display().to_string())];
+        let pty = Pty::spawn(&cmd(&["vhs-rs-test-marker"]), &env, (80, 24)).unwrap();
+
+        let output = read_to_eof(&pty).await;
+        assert!(output.contains("from-override"), "output: {output:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn missing_binary_exits_127() {
+        let mut pty = Pty::spawn(&cmd(&["definitely-not-a-binary-vhs-rs"]), &[], (80, 24)).unwrap();
+
+        read_to_eof(&pty).await;
+        let status = pty.shutdown().await.unwrap();
+        assert_eq!(status, Some(ExitStatus::Exited(127)));
+    }
+
+    #[tokio::test]
+    async fn nul_bytes_fail_before_forking() {
+        let env = vec![("X".to_string(), "a\0b".to_string())];
+        let err = Pty::spawn(&cmd(&["/bin/sh"]), &env, (80, 24)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+        let err = Pty::spawn(&cmd(&["/bin/e\0cho"]), &[], (80, 24)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[tokio::test]
