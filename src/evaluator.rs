@@ -231,6 +231,14 @@ async fn run_inner(
 
     // ---- Spawn the session with a pinned, deterministic environment.
     let argv = shell_argv(&settings.shell);
+    // C.UTF-8 is a glibc/musl locale; macOS doesn't ship it, and a locale
+    // that fails to resolve falls back to plain C — readline then mangles
+    // multibyte input, which surfaced as golden-tape timeouts on macOS CI.
+    let locale = if cfg!(target_os = "macos") {
+        "en_US.UTF-8"
+    } else {
+        "C.UTF-8"
+    };
     let mut env = vec![
         ("TERM".to_string(), "xterm-256color".to_string()),
         ("PS1".to_string(), "> ".to_string()),
@@ -240,8 +248,14 @@ async fn run_inner(
         ("PS2".to_string(), "... ".to_string()),
         ("PROMPT_COMMAND".to_string(), String::new()),
         ("HISTFILE".to_string(), String::new()),
-        ("LANG".to_string(), "C.UTF-8".to_string()),
-        ("LC_ALL".to_string(), "C.UTF-8".to_string()),
+        ("LANG".to_string(), locale.to_string()),
+        ("LC_ALL".to_string(), locale.to_string()),
+        // macOS bash 3.2 otherwise opens every interactive session with the
+        // "default shell is now zsh" banner, polluting the screen.
+        (
+            "BASH_SILENCE_DEPRECATION_WARNING".to_string(),
+            "1".to_string(),
+        ),
         ("VHS_RS".to_string(), "1".to_string()),
     ];
     env.extend(spawn_env);
@@ -367,6 +381,16 @@ async fn run_inner(
         }
 
         if registry.has_golden_targets() {
+            // Byte-identical goldens must not depend on whether a keystroke's
+            // echo landed inside the typing-speed settle window — on a loaded
+            // machine (CI) it regularly misses. Wait for the PTY to go
+            // briefly quiet before recording the frame.
+            quiesce(
+                &mut session,
+                Duration::from_millis(25),
+                Duration::from_millis(250),
+            )
+            .await;
             golden.record(&session.term().text());
         }
     }
@@ -816,6 +840,28 @@ async fn with_deadline<T>(
     match deadline {
         None => Some(fut.await),
         Some(d) => tokio::time::timeout_at(d, fut).await.ok(),
+    }
+}
+
+/// Drains until the PTY has been silent for `idle` (or `cap` total, so a
+/// child that streams continuously can't stall the run). Used before golden
+/// frames: a frame's content must not race the echo of the keystrokes that
+/// produced it.
+async fn quiesce(session: &mut Session, idle: Duration, cap: Duration) {
+    let deadline = Instant::now() + cap;
+    loop {
+        let _ = session.drain();
+        if session.exited() {
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        match session.wait_change(idle.min(remaining)).await {
+            Ok(true) => {} // output arrived; restart the idle window
+            _ => return,   // silent for the whole window (or unreadable)
+        }
     }
 }
 
