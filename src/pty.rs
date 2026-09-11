@@ -15,7 +15,7 @@
 //! the child in a locked state, and touching it would deadlock.
 //!
 //! Lifecycle guarantees:
-//! - [`Pty::shutdown`] terminates gracefully: SIGTERM, up to ~2s of polling,
+//! - [`Pty::shutdown`] terminates gracefully: SIGHUP/SIGTERM, up to ~2s of polling,
 //!   then SIGKILL + reap.
 //! - [`Drop`] is a best-effort SIGKILL + blocking reap, so no zombie children
 //!   survive even on panic/error paths.
@@ -202,7 +202,8 @@ impl Pty {
         }
     }
 
-    /// Graceful teardown: SIGTERM, poll for up to ~2s, then SIGKILL and a
+    /// Graceful teardown: hang up the terminal job and shell, poll for up to
+    /// ~2s, then SIGKILL and a
     /// blocking reap. Idempotent; returns the child's exit status.
     ///
     /// # Errors
@@ -212,7 +213,7 @@ impl Pty {
             return Ok(self.status);
         }
 
-        let _ = signal::kill(self.child, Signal::SIGTERM);
+        self.hangup();
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
 
@@ -228,6 +229,7 @@ impl Pty {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
+        self.kill_terminal_group(Signal::SIGKILL);
         let _ = signal::kill(self.child, Signal::SIGKILL);
 
         match wait::waitpid(self.child, None) {
@@ -241,12 +243,42 @@ impl Pty {
 
         Ok(self.status)
     }
+
+    /// Interactive shells ignore SIGTERM. SIGHUP asks them to terminate their
+    /// job table as well; the foreground job can be in a separate process group.
+    /// This does not claim ownership of programs that detach from the terminal.
+    fn hangup(&self) {
+        self.kill_terminal_group(Signal::SIGHUP);
+        let _ = signal::kill(self.child, Signal::SIGHUP);
+        let _ = signal::kill(self.child, Signal::SIGTERM);
+    }
+
+    fn kill_terminal_group(&self, sig: Signal) {
+        if let Ok(group) = unistd::tcgetpgrp(&self.master)
+            && group.as_raw() > 0
+            && group != unistd::getpgrp()
+        {
+            let _ = signal::killpg(group, sig);
+        }
+    }
 }
 
 impl Drop for Pty {
     /// Best-effort: never leave a zombie, even on error/panic paths.
     fn drop(&mut self) {
         if self.status.is_none() {
+            self.hangup();
+            // Give an interactive shell a bounded opportunity to forward the
+            // hangup to its background jobs before resorting to SIGKILL.
+            let deadline = std::time::Instant::now() + Duration::from_millis(100);
+            while std::time::Instant::now() < deadline {
+                match self.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+                    Err(_) => break,
+                }
+            }
+            self.kill_terminal_group(Signal::SIGKILL);
             let _ = signal::kill(self.child, Signal::SIGKILL);
             let _ = wait::waitpid(self.child, None);
         }

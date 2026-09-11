@@ -238,6 +238,32 @@ output depends on some variable, pin it in the tape:
 Env LS_COLORS "di=01;34:ex=01;32"
 ```
 
+## TypeScript / Node.js
+
+The npm SDK manages a bundled native binary and provides typed tape runs, live
+sessions, screenshots and replay. It requires Node 22+ and supports Linux x64
+and Apple Silicon; users do not need Rust or a daemon.
+
+```ts
+import { createSession } from "@cbxss/vhs-rs";
+
+const session = await createSession({ typingSpeedMs: 0 });
+try {
+  await session.type("echo hello");
+  await session.press("Enter");
+  await session.waitFor();
+  await session.assert("hello");
+  await session.screenshot("proof.png");
+} finally {
+  await session.close();
+}
+```
+
+See the [npm SDK documentation](npm/vhs-rs/README.md) for installation, API and
+lifecycle details, and [release instructions](npm/RELEASING.md) for building and
+publishing the packages. The structured wire contract is in
+[npm/PROTOCOL.md](npm/PROTOCOL.md).
+
 ## Installation
 
 One line (Linux x86_64 and Apple Silicon; installs to `~/.local/bin`):

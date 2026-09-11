@@ -1,0 +1,18 @@
+{
+  "name": "vhs-rs-npm-development",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p vhs-rs/tsconfig.json",
+    "test": "node --test scripts/test-release.mjs && npm run test:package",
+    "test:package": "node scripts/test-package.mjs",
+    "stage": "node scripts/stage.mjs",
+    "test:release": "node --test scripts/test-release.mjs",
+    "format:check": "prettier --check vhs-rs/src vhs-rs/test scripts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "prettier": "3.6.2",
+    "typescript": "^5.9.0"
+  }
+}
