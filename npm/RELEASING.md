@@ -1,6 +1,6 @@
 # npm development and release
 
-The next coordinated version is **0.3.0**. Keep `Cargo.toml`, `Cargo.lock`, the
+The next coordinated version is **0.3.1**. Keep `Cargo.toml`, `Cargo.lock`, the
 SDK manifest and both platform manifests (including optional dependency pins)
 at the same version. Commit all runtime changes and test fixtures required by
 the full suite before tagging. The repository may contain unrelated local work;

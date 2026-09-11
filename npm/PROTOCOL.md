@@ -5,7 +5,7 @@ All stdout is UTF-8 newline-delimited JSON. Diagnostics go to stderr.
 The first response is:
 
 ```json
-{"kind":"ready","version":1,"binary_version":"0.3.0"}
+{"kind":"ready","version":1,"binary_version":"0.3.1"}
 ```
 
 Requests have exactly `id` and `command`. IDs are strictly increasing positive
