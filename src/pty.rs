@@ -16,7 +16,7 @@
 //!
 //! Lifecycle guarantees:
 //! - [`Pty::shutdown`] terminates gracefully: SIGHUP/SIGTERM, up to ~2s of polling,
-//!   then SIGKILL + reap.
+//!   draining exit output, then SIGKILL + close master + reap.
 //! - [`Drop`] is a best-effort SIGKILL + blocking reap, so no zombie children
 //!   survive even on panic/error paths.
 
@@ -49,7 +49,7 @@ pub enum ExitStatus {
 #[derive(Debug)]
 pub struct Pty {
     child: Pid,
-    master: AsyncFd<OwnedFd>,
+    master: Option<AsyncFd<OwnedFd>>,
     /// Cached wait status once the child has been reaped (waitpid can only
     /// succeed once per child).
     status: Option<ExitStatus>,
@@ -95,7 +95,7 @@ impl Pty {
 
                 Ok(Self {
                     child,
-                    master,
+                    master: Some(master),
                     status: None,
                 })
             }
@@ -111,7 +111,10 @@ impl Pty {
     /// Returns any read error on the master fd (`EIO` maps to EOF, not an
     /// error).
     pub async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        self.master
+        let Some(master) = &self.master else {
+            return Ok(0);
+        };
+        master
             .async_io(Interest::READABLE, |fd| match unistd::read(fd, buf) {
                 Ok(n) => Ok(n),
                 Err(Errno::EIO) => Ok(0), // child gone: EOF
@@ -127,7 +130,10 @@ impl Pty {
     /// `WouldBlock` when no data is buffered; any other read error on the
     /// master fd (`EIO` maps to EOF).
     pub fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        match unistd::read(self.master.get_ref(), buf) {
+        let Some(master) = &self.master else {
+            return Ok(0);
+        };
+        match unistd::read(master.get_ref(), buf) {
             Ok(n) => Ok(n),
             Err(Errno::EIO) => Ok(0), // child gone: EOF
             Err(e) => Err(e.into()),  // EAGAIN maps to ErrorKind::WouldBlock
@@ -141,9 +147,9 @@ impl Pty {
     /// Returns any write error on the master fd, or `WriteZero` if the PTY
     /// stops accepting bytes.
     pub async fn write_all(&self, mut bytes: &[u8]) -> io::Result<()> {
+        let master = self.master.as_ref().ok_or(io::ErrorKind::BrokenPipe)?;
         while !bytes.is_empty() {
-            let n = self
-                .master
+            let n = master
                 .async_io(Interest::WRITABLE, |fd| {
                     unistd::write(fd, bytes).map_err(io::Error::from)
                 })
@@ -168,7 +174,9 @@ impl Pty {
             ws_ypixel: 0,
         };
 
-        unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &ws) };
+        if let Some(master) = &self.master {
+            unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &ws) };
+        }
     }
 
     /// The child's process id.
@@ -203,8 +211,8 @@ impl Pty {
     }
 
     /// Graceful teardown: hang up the terminal job and shell, poll for up to
-    /// ~2s, then SIGKILL and a
-    /// blocking reap. Idempotent; returns the child's exit status.
+    /// ~2s while draining exit output, then SIGKILL, close the master and
+    /// reap. Idempotent; returns the child's exit status.
     ///
     /// # Errors
     /// Returns an error if `waitpid` fails while reaping the child.
@@ -218,6 +226,7 @@ impl Pty {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
 
         loop {
+            self.drain_shutdown_output();
             if self.try_wait()?.is_some() {
                 return Ok(self.status);
             }
@@ -231,6 +240,9 @@ impl Pty {
 
         self.kill_terminal_group(Signal::SIGKILL);
         let _ = signal::kill(self.child, Signal::SIGKILL);
+        // On macOS, closing the slave can wait for unread terminal output
+        // even after SIGKILL. Release the master before blocking in waitpid.
+        self.master.take();
 
         match wait::waitpid(self.child, None) {
             Ok(WaitStatus::Exited(_, code)) => self.status = Some(ExitStatus::Exited(code)),
@@ -254,11 +266,26 @@ impl Pty {
     }
 
     fn kill_terminal_group(&self, sig: Signal) {
-        if let Ok(group) = unistd::tcgetpgrp(&self.master)
+        if let Some(master) = &self.master
+            && let Ok(group) = unistd::tcgetpgrp(master)
             && group.as_raw() > 0
             && group != unistd::getpgrp()
         {
             let _ = signal::killpg(group, sig);
+        }
+    }
+
+    /// Shutdown output is discarded, as it was before this drain was added.
+    /// Keep consuming it so an exit trap or macOS slave close can finish.
+    /// A bounded batch per poll preserves the grace deadline even when a
+    /// child continuously writes output instead of responding to SIGHUP.
+    fn drain_shutdown_output(&self) {
+        let mut buf = [0u8; 4096];
+        for _ in 0..16 {
+            match self.try_read(&mut buf) {
+                Ok(n) if n > 0 => {}
+                _ => break,
+            }
         }
     }
 }
@@ -272,6 +299,7 @@ impl Drop for Pty {
             // hangup to its background jobs before resorting to SIGKILL.
             let deadline = std::time::Instant::now() + Duration::from_millis(100);
             while std::time::Instant::now() < deadline {
+                self.drain_shutdown_output();
                 match self.try_wait() {
                     Ok(Some(_)) => return,
                     Ok(None) => std::thread::sleep(Duration::from_millis(5)),
@@ -280,6 +308,7 @@ impl Drop for Pty {
             }
             self.kill_terminal_group(Signal::SIGKILL);
             let _ = signal::kill(self.child, Signal::SIGKILL);
+            self.master.take();
             let _ = wait::waitpid(self.child, None);
         }
     }
@@ -453,6 +482,72 @@ mod tests {
 
         let res = wait::waitpid(Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG));
         assert_eq!(res, Err(Errno::ECHILD));
+    }
+
+    async fn shutdown_child(script: &str) -> Pty {
+        let pty = Pty::spawn(&cmd(&["/bin/sh", "-c", script]), &[], (80, 24)).unwrap();
+        let mut buf = [0u8; 4096];
+        let mut output = String::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !output.contains("READY") {
+                let n = pty.read(&mut buf).await.unwrap();
+                assert!(n > 0, "child exited before READY: {output:?}");
+                output.push_str(&String::from_utf8_lossy(&buf[..n]));
+            }
+        })
+        .await
+        .expect("child readiness");
+        pty
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_output_written_by_hangup_trap() {
+        // More than a PTY buffer: without reading during shutdown, the trap
+        // cannot finish and the child gets killed (or hangs in macOS close).
+        let mut pty = shutdown_child(
+            "trap '' TERM; trap 'dd if=/dev/zero bs=65536 count=1 2>/dev/null; exit 0' HUP; \
+             echo READY; while :; do :; done",
+        )
+        .await;
+        let pid = Pid::from_raw(pty.pid());
+        assert_eq!(pty.shutdown().await.unwrap(), Some(ExitStatus::Exited(0)));
+        assert_eq!(pty.shutdown().await.unwrap(), Some(ExitStatus::Exited(0)));
+        assert_eq!(
+            wait::waitpid(pid, Some(WaitPidFlag::WNOHANG)),
+            Err(Errno::ECHILD)
+        );
+    }
+
+    const IGNORE_HANGUP_AND_WRITE: &str =
+        "trap '' HUP TERM; echo READY; while :; do printf 'still writing output\\n'; done";
+
+    #[tokio::test]
+    async fn shutdown_kills_writer_that_ignores_hangup() {
+        let mut pty = shutdown_child(IGNORE_HANGUP_AND_WRITE).await;
+        let pid = Pid::from_raw(pty.pid());
+        let start = std::time::Instant::now();
+        assert_eq!(
+            pty.shutdown().await.unwrap(),
+            Some(ExitStatus::Signaled(Signal::SIGKILL as i32))
+        );
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert_eq!(
+            wait::waitpid(pid, Some(WaitPidFlag::WNOHANG)),
+            Err(Errno::ECHILD)
+        );
+    }
+
+    #[tokio::test]
+    async fn drop_reaps_writer_with_unread_output() {
+        let pty = shutdown_child(IGNORE_HANGUP_AND_WRITE).await;
+        let pid = Pid::from_raw(pty.pid());
+        let start = std::time::Instant::now();
+        drop(pty);
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert_eq!(
+            wait::waitpid(pid, Some(WaitPidFlag::WNOHANG)),
+            Err(Errno::ECHILD)
+        );
     }
 
     #[tokio::test]
