@@ -25,7 +25,7 @@ impl Canvas {
 
     /// Fills the whole canvas with an opaque color.
     pub fn fill(&mut self, c: Rgb) {
-        for px in self.buf.chunks_exact_mut(4) {
+        for px in self.buf.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&[c.0, c.1, c.2, 0xff]);
         }
     }
@@ -59,7 +59,7 @@ impl Canvas {
         let y1 = (y1.max(0) as usize).min(self.h);
         for y in y0..y1 {
             let row = (y * self.w + x0) * 4;
-            for px in self.buf[row..row + (x1 - x0) * 4].chunks_exact_mut(4) {
+            for px in self.buf[row..row + (x1 - x0) * 4].as_chunks_mut::<4>().0 {
                 px.copy_from_slice(&[c.0, c.1, c.2, 0xff]);
             }
         }

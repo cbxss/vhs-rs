@@ -154,7 +154,7 @@ impl Palette {
     /// unchanged and callers abandon exact indexing at that point.
     fn index_frame(&mut self, rgba: &[u8]) -> Option<Vec<u8>> {
         let mut out = Vec::with_capacity(rgba.len() / 4);
-        for px in rgba.chunks_exact(4) {
+        for px in rgba.as_chunks::<4>().0 {
             out.push(self.index([px[0], px[1], px[2]])?);
         }
         Some(out)
