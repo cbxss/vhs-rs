@@ -1,0 +1,27 @@
+{
+  "name": "@cbxss/vhs-rs-linux-x64",
+  "version": "0.3.0",
+  "description": "Prebuilt vhs-rs binary for linux-x64",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin",
+    "LICENSE",
+    "OFL.txt",
+    "SYMBOLS-LICENSE.txt",
+    "README.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cbxss/vhs-rs.git",
+    "directory": "npm/vhs-rs-linux-x64"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

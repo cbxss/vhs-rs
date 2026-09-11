@@ -122,6 +122,9 @@ struct RunArgs {
 
 #[derive(Args)]
 struct ReplArgs {
+    /// Accept versioned JSON requests instead of tape-language lines
+    #[arg(long)]
+    json_input: bool,
     /// Abort the session on the first failed command
     #[arg(long)]
     strict: bool,
@@ -183,6 +186,7 @@ pub fn main() -> i32 {
             quiet: args.quiet,
             timeout: args.timeout,
             record: args.record,
+            json_input: args.json_input,
         }),
         None => run(cli.run),
     }

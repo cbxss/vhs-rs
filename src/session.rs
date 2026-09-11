@@ -79,6 +79,7 @@ pub struct Session {
     start: Instant,
     decoder: Utf8Decoder,
     exited: bool,
+    input_pending: bool,
 }
 
 impl Session {
@@ -103,6 +104,7 @@ impl Session {
             start: Instant::now(),
             decoder: Utf8Decoder::new(),
             exited: false,
+            input_pending: false,
         })
     }
 
@@ -169,8 +171,19 @@ impl Session {
     ///
     /// # Errors
     /// Returns any write error on the PTY master.
-    pub async fn write(&self, bytes: &[u8]) -> io::Result<()> {
+    pub async fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        // Separate output that predates this input from its eventual response.
+        // At zero typing speed the evaluator may otherwise observe an old
+        // prompt immediately after sending Enter and declare the command done.
+        self.drain()?;
+        if !bytes.is_empty() {
+            self.input_pending = true;
+        }
         self.pty.write_all(bytes).await
+    }
+
+    pub(crate) fn input_pending(&self) -> bool {
+        self.input_pending
     }
 
     /// Resizes both the PTY (child sees SIGWINCH) and the screen model, and
@@ -243,6 +256,7 @@ impl Session {
         }
 
         self.term.feed(&text);
+        self.input_pending = false;
         self.push_event(SessionEventKind::Output(text));
     }
 

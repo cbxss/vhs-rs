@@ -292,10 +292,11 @@ async fn run_inner(
 
     // ---- Command loop.
     let mut exit = ExitKind::Success;
+    let mut commands_started = false;
 
     for (index, (cmd, res)) in commands.iter().zip(resolved.iter()).enumerate() {
         let step_start = Instant::now();
-        let result = with_deadline(deadline, engine.exec(index, cmd, res))
+        let result = with_deadline(deadline, engine.exec(index, cmd, res, commands_started))
             .await
             .unwrap_or_else(|| {
                 Err(StepFailure::runtime_reason(
@@ -330,6 +331,9 @@ async fn run_inner(
         }
 
         engine.record_golden_frame().await;
+        if starts_commands(cmd) {
+            commands_started = true;
+        }
     }
 
     // ---- Failure forensics: dump exactly what the terminal showed.
@@ -479,6 +483,7 @@ impl Engine {
             Scope::Line,
             &pattern,
             self.settings.wait_timeout,
+            false,
         )
         .await
     }
@@ -489,6 +494,7 @@ impl Engine {
         index: usize,
         cmd: &Command,
         res: &Resolved,
+        commands_started: bool,
     ) -> Result<Option<serde_json::Value>, StepFailure> {
         execute(
             cmd,
@@ -501,6 +507,7 @@ impl Engine {
             &mut self.registry,
             index,
             self.quiet,
+            commands_started,
         )
         .await
     }
@@ -864,6 +871,7 @@ async fn execute(
     registry: &mut ArtifactRegistry,
     index: usize,
     quiet: bool,
+    commands_started: bool,
 ) -> Result<Option<serde_json::Value>, StepFailure> {
     use TokenType::*;
 
@@ -871,7 +879,7 @@ async fn execute(
         // Handled in the pre-pass.
         Output | Require => Ok(None),
         Env => {
-            if !quiet {
+            if commands_started && !quiet {
                 eprintln!(
                     "vhs-rs: warning: Env after commands started has no effect (line {})",
                     cmd.token.line
@@ -963,10 +971,11 @@ async fn execute(
                 return Err(resolved_mismatch(cmd));
             };
             let scope = *scope;
+            let require_fresh = regex.is_none();
             let regex = regex.as_ref().unwrap_or(&settings.wait_pattern);
             let timeout = timeout.unwrap_or(settings.wait_timeout);
             let started = Instant::now();
-            match wait_for(session, scope, regex, timeout)
+            match wait_for(session, scope, regex, timeout, require_fresh)
                 .await
                 .map_err(io_fail)?
             {
@@ -1028,7 +1037,7 @@ async fn execute(
                         WaitOutcome::TimedOut
                     }
                 }
-                Some(timeout) => wait_for(session, scope, regex, *timeout)
+                Some(timeout) => wait_for(session, scope, regex, *timeout, false)
                     .await
                     .map_err(io_fail)?,
             };
@@ -1143,6 +1152,17 @@ async fn execute(
     }
 }
 
+fn starts_commands(cmd: &Command) -> bool {
+    !matches!(
+        cmd.command_type,
+        TokenType::Set
+            | TokenType::Env
+            | TokenType::Output
+            | TokenType::Require
+            | TokenType::Illegal
+    )
+}
+
 // ---- Wait/Assert machinery --------------------------------------------------
 
 fn screen_detail(term: &Term) -> serde_json::Value {
@@ -1199,11 +1219,14 @@ async fn wait_for(
     scope: Scope,
     regex: &Regex,
     timeout: Duration,
+    require_fresh: bool,
 ) -> std::io::Result<WaitOutcome> {
     let deadline = Instant::now() + timeout;
     loop {
         session.drain()?;
-        if regex.is_match(&scope.text(session.term())) {
+        if (!require_fresh || !session.input_pending())
+            && regex.is_match(&scope.text(session.term()))
+        {
             return Ok(WaitOutcome::Matched);
         }
         if session.exited() {
@@ -1474,6 +1497,51 @@ mod tests {
             time: Duration::ZERO,
             kind: SessionEventKind::Output(s.into()),
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prompt_wait_does_not_match_screen_from_before_input() {
+        let mut session = Session::spawn(
+            &[
+                "sh".into(),
+                "-c".into(),
+                "stty -echo; printf '> '; read line; sleep 0.1; printf 'processed\\n> '; read line"
+                    .into(),
+            ],
+            &[],
+            40,
+            5,
+        )
+        .unwrap();
+        let prompt = Regex::new(">$").unwrap();
+        assert_eq!(
+            wait_for(
+                &mut session,
+                Scope::Line,
+                &prompt,
+                Duration::from_secs(2),
+                false
+            )
+            .await
+            .unwrap(),
+            WaitOutcome::Matched
+        );
+        session.write(b"\n").await.unwrap();
+        assert!(session.input_pending());
+        assert_eq!(
+            wait_for(
+                &mut session,
+                Scope::Line,
+                &prompt,
+                Duration::from_secs(2),
+                true
+            )
+            .await
+            .unwrap(),
+            WaitOutcome::Matched
+        );
+        assert!(session.term().text().contains("processed"));
+        session.shutdown().await.unwrap();
     }
 
     #[test]

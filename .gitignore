@@ -16,3 +16,9 @@
 /theme-*.png
 *.failure.txt
 *.failure.png
+
+# npm development and release staging
+node_modules/
+/npm/vhs-rs/dist/
+/npm/artifacts/
+/npm/staging/

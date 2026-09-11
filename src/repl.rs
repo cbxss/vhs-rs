@@ -18,12 +18,16 @@ use crate::report::{CommandStatus, ReportBuilder};
 use crate::resolve::{Resolved, resolve_commands};
 use crate::token::TokenType;
 
+mod protocol;
+
 const TAPE_NAME: &str = "repl";
 const PTY_WAIT: Duration = Duration::from_secs(3600);
 
 /// CLI request for `vhs-rs repl`.
 #[derive(Debug)]
 pub struct ReplRequest {
+    /// Use the structured SDK protocol instead of tape-language input.
+    pub json_input: bool,
     /// Abort the session on the first failed command, restoring batch-style
     /// control flow and exit taxonomy.
     pub strict: bool,
@@ -48,7 +52,11 @@ pub fn repl(req: &ReplRequest) -> i32 {
         }
     };
 
-    rt.block_on(repl_inner(req))
+    if req.json_input {
+        rt.block_on(protocol::run(req))
+    } else {
+        rt.block_on(repl_inner(req))
+    }
 }
 
 struct ReplState<'a> {
@@ -516,7 +524,7 @@ async fn run_command_with_deadline(
     res: &Resolved,
     deadline: Option<tokio::time::Instant>,
 ) -> Result<Option<serde_json::Value>, StepFailure> {
-    let fut = engine.exec(index, cmd, res);
+    let fut = engine.exec(index, cmd, res, true);
     match deadline {
         None => fut.await,
         Some(deadline) => tokio::time::timeout_at(deadline, fut)

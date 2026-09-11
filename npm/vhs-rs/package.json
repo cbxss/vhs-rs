@@ -1,0 +1,48 @@
+{
+  "name": "@cbxss/vhs-rs",
+  "version": "0.3.0",
+  "description": "Typed terminal automation, screenshots and GIFs powered by a bundled Rust binary",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "vhs-rs": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "OFL.txt",
+    "SYMBOLS-LICENSE.txt",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "os": [
+    "linux",
+    "darwin"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "optionalDependencies": {
+    "@cbxss/vhs-rs-linux-x64": "0.3.0",
+    "@cbxss/vhs-rs-darwin-arm64": "0.3.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cbxss/vhs-rs.git",
+    "directory": "npm/vhs-rs"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

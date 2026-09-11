@@ -1,0 +1,65 @@
+name: Verify release artifacts
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+            target: x86_64-unknown-linux-musl
+          - os: macos-14
+            platform: darwin-arm64
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Add release target
+        run: rustup target add ${{ matrix.target }}
+      - name: Full Rust suite
+        run: cargo test --locked
+      - name: Format and Clippy
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+      - name: Build release binary
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Validate examples
+        run: |
+          for tape in examples/*.tape; do
+            ./target/${{ matrix.target }}/release/vhs-rs check "$tape"
+          done
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Build and pack npm artifacts
+        run: |
+          npm ci --prefix npm --ignore-scripts
+          npm run format:check --prefix npm
+          npm run build --prefix npm
+          npm run test:release --prefix npm
+          node npm/scripts/stage.mjs ${{ matrix.platform }} target/${{ matrix.target }}/release/vhs-rs
+      - name: Installed package tests (Node 22)
+        run: npm run test:package --prefix npm
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Installed package tests (Node 24)
+        run: npm run test:package --prefix npm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: npm/artifacts/*
+          if-no-files-found: error
