@@ -10,6 +10,9 @@ import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 const exec = promisify(execFile);
 const script = resolve(dirname(fileURLToPath(import.meta.url)), "publish.mjs");
+const { version } = JSON.parse(
+  await readFile(new URL("../vhs-rs/package.json", import.meta.url)),
+);
 const names = [
   "@cbxss/vhs-rs-linux-x64",
   "@cbxss/vhs-rs-darwin-arm64",
@@ -30,7 +33,7 @@ test("release ordering, identical retries, mismatch rejection and missing artifa
     const file = join(artifacts, `${name.split("/")[1]}.tgz`);
     await writeFile(
       join(source, "package.json"),
-      JSON.stringify({ name, version: "0.3.0" }),
+      JSON.stringify({ name, version }),
     );
     await exec("tar", ["-czf", file, "-C", join(dir, "source"), "package"]);
     meta[file] = {
@@ -63,16 +66,16 @@ else throw new Error('Unexpected npm command');
       new URL(request.url, "http://localhost").pathname,
     );
     const remote = JSON.parse(await readFile(join(dir, "remote.json")));
-    const name = path.slice(1, -"/0.3.0".length);
+    const name = path.slice(1, -`/${version}`.length);
     response.setHeader("content-type", "application/json");
-    if (!path.endsWith("/0.3.0") || !remote[name]) {
+    if (!path.endsWith(`/${version}`) || !remote[name]) {
       response.writeHead(404);
       response.end('{"error":"Not found"}');
     } else {
       response.end(
         JSON.stringify({
           name,
-          version: "0.3.0",
+          version,
           dist: { integrity: remote[name] },
         }),
       );
@@ -88,7 +91,7 @@ else throw new Error('Unexpected npm command');
     PATH: `${bin}:${process.env.PATH}`,
     VHS_RELEASE_FIXTURE: dir,
     NPM_CONFIG_REGISTRY: `http://127.0.0.1:${server.address().port}/`,
-    GITHUB_REF_NAME: "v0.3.0",
+    GITHUB_REF_NAME: `v${version}`,
   };
   const args = [script, join(dir, "artifacts"), "--publish"];
   await exec(process.execPath, args, { env });

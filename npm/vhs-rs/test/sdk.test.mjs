@@ -80,7 +80,7 @@ test("packed resolver, supported platforms and versions", () => {
       ),
     reason("missing_binary"),
   );
-  assert.equal(version, "0.3.0");
+  assert.equal(version, "0.3.1");
 });
 
 test("batch, file paths, cwd, env, check and all structured failure codes", async (t) => {

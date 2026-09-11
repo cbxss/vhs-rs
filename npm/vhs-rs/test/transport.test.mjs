@@ -10,7 +10,7 @@ const installed = join(
 );
 const platform = `${process.platform === "darwin" ? "darwin" : "linux"}-${process.arch}`;
 
-async function fixture(t, script, manifestVersion = "0.3.0") {
+async function fixture(t, script, manifestVersion = "0.3.1") {
   const root = await mkdtemp(join(tmpdir(), "vhs-transport-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const scope = join(root, "node_modules/@cbxss");
@@ -35,7 +35,7 @@ async function fixture(t, script, manifestVersion = "0.3.0") {
   const sdk = await import(pathToFileURL(join(scope, "vhs-rs/dist/index.js")));
   return { sdk, root };
 }
-const hello = `console.log(JSON.stringify({kind:'ready',version:1,binary_version:'0.3.0'}));`;
+const hello = `console.log(JSON.stringify({kind:'ready',version:1,binary_version:'0.3.1'}));`;
 const configure = `let buf=''; process.stdin.setEncoding('utf8'); process.stdin.on('data', chunk => { buf+=chunk; let end; while((end=buf.indexOf('\\n'))>=0) { const req=JSON.parse(buf.slice(0,end));buf=buf.slice(end+1); handle(req); } });`;
 
 test("mismatched package and wire versions fail closed", async (t) => {
@@ -46,7 +46,7 @@ test("mismatched package and wire versions fail closed", async (t) => {
   );
   const badWire = await fixture(
     t,
-    `console.log('{"kind":"ready","version":99,"binary_version":"0.3.0"}'); setInterval(()=>{},1000);`,
+    `console.log('{"kind":"ready","version":99,"binary_version":"0.3.1"}'); setInterval(()=>{},1000);`,
   );
   await assert.rejects(
     badWire.sdk.createSession(),
