@@ -1,15 +1,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile, rm, stat } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  writeFile,
+  rm,
+  stat,
+  realpath,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
-const root = process.env.VHS_TEST_PACKAGE_ROOT;
-if (!root)
+const consumerRoot = process.env.VHS_TEST_PACKAGE_ROOT;
+if (!consumerRoot)
   throw new Error(
     "Run npm run test:package after staging the release artifacts",
   );
+const root = await realpath(consumerRoot);
 const dist = join(root, "node_modules/@cbxss/vhs-rs/dist");
 const { run, runFile, check, createSession, render, VhsError } = await import(
   pathToFileURL(join(dist, "index.js"))
