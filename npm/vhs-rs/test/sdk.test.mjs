@@ -26,9 +26,24 @@ const { resolveBinary, version } = await import(
   pathToFileURL(join(dist, "binary.js"))
 );
 
+// Node test after-hooks run in registration order. Resource disposal must run
+// in reverse acquisition order so sessions finish before their directories go.
+const cleanupStacks = new WeakMap();
+function cleanup(t, callback) {
+  let stack = cleanupStacks.get(t);
+  if (!stack) {
+    stack = [];
+    cleanupStacks.set(t, stack);
+    t.after(async () => {
+      for (const dispose of stack.reverse()) await dispose();
+    });
+  }
+  stack.push(callback);
+}
+
 async function scratch(t) {
   const dir = await mkdtemp(join(tmpdir(), "vhs-sdk-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  cleanup(t, () => rm(dir, { recursive: true, force: true }));
   return dir;
 }
 async function session(t, options = {}) {
@@ -37,7 +52,7 @@ async function session(t, options = {}) {
     typingSpeedMs: 0,
     ...options,
   });
-  t.after(async () => {
+  cleanup(t, async () => {
     try {
       await s.close();
     } catch {}
