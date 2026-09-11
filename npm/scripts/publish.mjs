@@ -44,25 +44,40 @@ const order = [
 ];
 if (packages.size !== order.length || order.some((name) => !packages.has(name)))
   throw new Error("Expected the SDK and both platform packages");
+// Read the exact version: the aggregate package document used by npm view can
+// lag a successful publication and return a cached 404 for a brand-new package.
+const registry =
+  process.env.NPM_CONFIG_REGISTRY ?? "https://registry.npmjs.org/";
+async function publishedIntegrity(name) {
+  const url = new URL(
+    `${name.replace("/", "%2f")}/${version}`,
+    registry.endsWith("/") ? registry : registry + "/",
+  );
+  const response = await fetch(url, {
+    headers: { "cache-control": "no-cache" },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (response.status === 404) return undefined;
+  if (!response.ok)
+    throw new Error(
+      `Registry returned ${response.status} for ${name}@${version}`,
+    );
+  const pkg = await response.json();
+  if (
+    pkg.name !== name ||
+    pkg.version !== version ||
+    typeof pkg.dist?.integrity !== "string"
+  ) {
+    throw new Error(`Invalid registry metadata for ${name}@${version}`);
+  }
+  return pkg.dist.integrity;
+}
+
 for (const name of order) {
   const { path, integrity } = packages.get(name);
   console.log(`${name}@${version}: ${path} (${integrity})`);
   if (!publish) continue;
-  let remote;
-  try {
-    remote = JSON.parse(
-      (
-        await exec("npm", [
-          "view",
-          `${name}@${version}`,
-          "dist.integrity",
-          "--json",
-        ])
-      ).stdout,
-    );
-  } catch (error) {
-    if (!String(error.stderr).includes("E404")) throw error;
-  }
+  const remote = await publishedIntegrity(name);
   if (remote) {
     if (remote !== integrity)
       throw new Error(
@@ -70,7 +85,7 @@ for (const name of order) {
       );
     console.log("Already published with identical contents; skipping");
   } else {
-    await exec("npm", [
+    const result = await exec("npm", [
       "publish",
       path,
       "--access",
@@ -79,29 +94,19 @@ for (const name of order) {
       expectedTag,
       "--ignore-scripts",
     ]);
+    process.stdout.write(result.stdout);
   }
   // The SDK is not published until both platform versions are visible.
   let visible = false;
-  for (let attempt = 0; attempt < 10; attempt++) {
-    try {
-      const result = JSON.parse(
-        (
-          await exec("npm", [
-            "view",
-            `${name}@${version}`,
-            "dist.integrity",
-            "--json",
-          ])
-        ).stdout,
-      );
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const result = await publishedIntegrity(name);
+    if (result !== undefined) {
       if (result !== integrity)
         throw new Error(`Published integrity differs for ${name}`);
       visible = true;
       break;
-    } catch (error) {
-      if (!String(error.stderr).includes("E404")) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 2000));
     }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
   }
   if (!visible)
     throw new Error(`${name}@${version} is not visible yet; rerun the release`);

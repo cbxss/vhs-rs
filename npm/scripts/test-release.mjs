@@ -1,4 +1,5 @@
 import test from "node:test";
+import { createServer } from "node:http";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -55,10 +56,38 @@ else throw new Error('Unexpected npm command');
 `,
     { mode: 0o755 },
   );
+  // Aggregate package documents deliberately stay unavailable. Exact-version
+  // reads become visible after the fake npm publisher records the upload.
+  const server = createServer(async (request, response) => {
+    const path = decodeURIComponent(
+      new URL(request.url, "http://localhost").pathname,
+    );
+    const remote = JSON.parse(await readFile(join(dir, "remote.json")));
+    const name = path.slice(1, -"/0.3.0".length);
+    response.setHeader("content-type", "application/json");
+    if (!path.endsWith("/0.3.0") || !remote[name]) {
+      response.writeHead(404);
+      response.end('{"error":"Not found"}');
+    } else {
+      response.end(
+        JSON.stringify({
+          name,
+          version: "0.3.0",
+          dist: { integrity: remote[name] },
+        }),
+      );
+    }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  });
   const env = {
     ...process.env,
     PATH: `${bin}:${process.env.PATH}`,
     VHS_RELEASE_FIXTURE: dir,
+    NPM_CONFIG_REGISTRY: `http://127.0.0.1:${server.address().port}/`,
     GITHUB_REF_NAME: "v0.3.0",
   };
   const args = [script, join(dir, "artifacts"), "--publish"];
