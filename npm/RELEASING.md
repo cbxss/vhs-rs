@@ -75,5 +75,26 @@ failed publishing job with its original build artifacts. GitHub asset retries
 likewise verify existing bytes before skipping them. Rebuilding an already
 published version can change artifacts; bump the version instead of replacing it.
 
+GitHub only allows reruns for 30 days. If the original run is older, dispatch
+`release.yml` from the current branch with its original Release run ID:
+
+```sh
+gh workflow run release.yml -f source-run-id=34643339627
+```
+
+Recovery requires a completed tag-push Release run, successful Linux and macOS
+verification, and a tag that still points at the original commit. It downloads
+that run's retained artifacts and checks out that commit for publication; it
+does not rebuild. Existing npm packages and GitHub assets must match exactly.
+Expired artifacts cannot be recovered this way.
+
+An npm `E404` during publication can mean the OIDC exchange was rejected, even
+when the package exists. Publishing logs include npm's verbose OIDC diagnostics.
+Check the trusted publisher settings for all three packages: `cbxss`, `vhs-rs`,
+`release.yml`, no environment name, and direct `npm publish` allowed. Newly
+configured publishers expire if their first successful publish does not happen
+within two days; recreate an expired configuration. The workflow uses OIDC
+without an npm token or a generated token-auth `.npmrc`.
+
 See [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/) for
 account-side configuration and current CLI requirements.

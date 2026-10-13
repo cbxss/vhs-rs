@@ -93,6 +93,8 @@ for (const name of order) {
       "--tag",
       expectedTag,
       "--ignore-scripts",
+      "--loglevel",
+      "verbose",
     ]);
     process.stdout.write(result.stdout);
   }
