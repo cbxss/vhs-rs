@@ -23,7 +23,7 @@ jobs:
           if (!token) throw new Error('NPM_PUBLISH is absent');
           console.log('Token whitespace:', token !== token.trim());
           const headers = {authorization: `Bearer ${token}`};
-          for (const path of ['/-/whoami', '/-/npm/v1/tokens']) {
+          for (const path of ['/-/whoami', '/-/npm/v1/tokens', '/-/package/@cbxss%2fvhs-rs-linux-x64/access']) {
             const response = await fetch(`https://registry.npmjs.org${path}`, {headers});
             console.log(path, 'HTTP', response.status);
             if (!response.ok) continue;
@@ -32,11 +32,25 @@ jobs:
               console.log('npm username:', data.username);
               continue;
             }
+            if (path.includes('/package/')) {
+              console.log('Package policy fields:', Object.keys(data));
+              console.log('Package publish_requires_tfa:', data.publish_requires_tfa ?? null);
+              console.log('Package automation_token_overrides_tfa:', data.automation_token_overrides_tfa ?? null);
+              continue;
+            }
+            const scrub = value => {
+              if (typeof value === 'string') return value.replaceAll(token, '[redacted]');
+              if (Array.isArray(value)) return value.map(scrub);
+              if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([key]) => !['token', 'key', 'password'].includes(key)).map(([key, val]) => [key, scrub(val)]));
+              return value;
+            };
             const rows = data.objects ?? [];
             console.log('Token records:', rows.length);
             for (const row of rows) {
               const prefix = typeof row.token === 'string' ? row.token : '';
               const matches = prefix.length > 5 && token.startsWith(prefix);
+              console.log('Token metadata:', JSON.stringify(scrub({name:row.name, permissions:row.permissions, scopes:row.scopes, bypass_2fa:row.bypass_2fa, expiry:row.expiry, accessed:row.accessed, updated:row.updated, revoked:row.revoked})));
+              console.log('Masked token format:', JSON.stringify({length:prefix.length, ellipsis:prefix.includes('...'), stars:prefix.includes('*')}));
               console.log(JSON.stringify({matchesCurrentToken: matches,
                 fields: Object.keys(row),
                 bypass2fa: row.bypass_2fa ?? row.bypass2fa ?? null,
