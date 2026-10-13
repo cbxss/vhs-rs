@@ -3,43 +3,83 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      source-run-id:
+        description: 'Original Release run whose verified artifacts should be retried'
+        required: true
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.source-run-id || github.ref }}
   cancel-in-progress: false
 
 jobs:
-  verify:
-    uses: ./.github/workflows/verify.yml
-
-  publish:
-    needs: verify
+  source:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      id-token: write
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      tag: ${{ steps.source.outputs.tag }}
+      run-id: ${{ steps.source.outputs.run-id }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-          registry-url: https://registry.npmjs.org
+      - name: Resolve original verified release
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source-run-id }}
+        run: node npm/scripts/release-source.mjs
+
+  verify:
+    needs: source
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/verify.yml
+
+  publish:
+    needs: [source, verify]
+    if: >-
+      !cancelled() && needs.source.result == 'success' &&
+      (needs.verify.result == 'success' ||
+       (github.event_name == 'workflow_dispatch' && needs.verify.result == 'skipped'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - name: Install publishing CLI
         run: npm install --global npm@11.16.0
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
           path: release-artifacts
+          run-id: ${{ needs.source.outputs.run-id }}
+          github-token: ${{ github.token }}
       - name: Publish verified npm packages
-        run: node npm/scripts/publish.mjs release-artifacts --publish
+        env:
+          RELEASE_TAG: ${{ needs.source.outputs.tag }}
+        # Older release commits only understand GITHUB_REF_NAME. Set it for the
+        # child process; GitHub ignores overrides of its reserved variables in env.
+        run: GITHUB_REF_NAME="$RELEASE_TAG" node npm/scripts/publish.mjs release-artifacts --publish
       - name: Publish GitHub release assets
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.source.outputs.tag }}
         run: |
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME"
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --generate-notes --title "$RELEASE_TAG"
           fi
-          node npm/scripts/github-assets.mjs "$GITHUB_REF_NAME" release-artifacts
+          node npm/scripts/github-assets.mjs "$RELEASE_TAG" release-artifacts
