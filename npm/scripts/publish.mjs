@@ -99,8 +99,9 @@ for (const name of order) {
     process.stdout.write(result.stdout);
   }
   // The SDK is not published until both platform versions are visible.
+  // Registry propagation can exceed a minute after npm accepts an upload.
   let visible = false;
-  for (let attempt = 0; attempt < 30; attempt++) {
+  for (let attempt = 0; attempt < 90; attempt++) {
     const result = await publishedIntegrity(name);
     if (result !== undefined) {
       if (result !== integrity)
