@@ -1,6 +1,6 @@
 # @cbxss/vhs-rs
 
-Typed terminal automation with a bundled Rust binary. Node 22+, Linux x64 or
+Script, test, and record real terminals from TypeScript with a bundled binary. Node 22+, Linux x64 or
 macOS Apple Silicon, and a shell (bash by default). No Cargo, global installation,
 install scripts, server, or daemon. Native Windows, Intel macOS and Linux ARM64
 binaries are not included in this release.
@@ -18,7 +18,7 @@ installation. Unsupported platforms and missing binary packages fail explicitly.
 import { run, runFile, check, createSession, render } from "@cbxss/vhs-rs";
 
 const report = await run({
-  tape: 'Type "echo hello"\nEnter\nWait\nAssert /hello/\n',
+  tape: 'Type "echo $((6 * 7))"\nEnter\nWait\nAssert /(?m)^42$/\n',
   timeoutMs: 30_000,
 });
 if (report.status !== "success") console.error(report.failure);
@@ -30,10 +30,10 @@ const session = await createSession({
   timeoutMs: 60_000,
 });
 try {
-  await session.type("echo hello");
+  await session.type("echo $((6 * 7))");
   await session.press("Enter");
   await session.waitFor(); // default shell prompt, current line
-  await session.assert("hello"); // Rust regex, full screen
+  await session.assert("(?m)^42$"); // Rust regex, full screen
   console.log((await session.screen()).screen_text);
   await session.screenshot("proof.png"); // also writes proof.txt
 } finally {
@@ -87,3 +87,8 @@ against `cwd`. Shell commands run with your application's permissions.
 The package is ESM. Import it from TypeScript/JavaScript in Node; CommonJS callers
 can use dynamic `import()`. The `render` result lists absolute output paths; a
 failed render throws and may have written partial artifacts.
+
+Screen assertions include echoed input and earlier output. Use anchored output
+lines or computed markers, and clear stale output when necessary. Session/tape
+success does not check each shell command's exit status; print and assert on
+that status explicitly when it matters.

@@ -26,7 +26,7 @@ Exit codes:
 #[command(
     name = "vhs-rs",
     version,
-    about = "Agent-first terminal automation: VHS-compatible tapes, screenshots, GIFs — no browser",
+    about = "Script, test, and record your terminal — screenshots, GIFs, replay, no browser",
     after_help = EXIT_CODES_HELP,
     args_conflicts_with_subcommands = true
 )]

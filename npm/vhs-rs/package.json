@@ -1,7 +1,7 @@
 {
   "name": "@cbxss/vhs-rs",
-  "version": "0.3.1",
-  "description": "Typed terminal automation, screenshots and GIFs powered by a bundled Rust binary",
+  "version": "0.3.2",
+  "description": "Script, test, and record real terminals. Screenshots, GIFs, replay, and TypeScript control.",
   "type": "module",
   "exports": {
     ".": {
@@ -33,8 +33,8 @@
     "arm64"
   ],
   "optionalDependencies": {
-    "@cbxss/vhs-rs-linux-x64": "0.3.1",
-    "@cbxss/vhs-rs-darwin-arm64": "0.3.1"
+    "@cbxss/vhs-rs-linux-x64": "0.3.2",
+    "@cbxss/vhs-rs-darwin-arm64": "0.3.2"
   },
   "license": "MIT",
   "repository": {
@@ -44,5 +44,18 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "homepage": "https://github.com/cbxss/vhs-rs#readme",
+  "keywords": [
+    "terminal",
+    "automation",
+    "cli",
+    "tui",
+    "testing",
+    "gif",
+    "screenshot",
+    "typescript",
+    "pty",
+    "vhs"
+  ]
 }

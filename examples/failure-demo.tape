@@ -15,6 +15,15 @@
 
 Output failure-demo.txt
 
+Set Width 700
+Set Height 420
+Set FontSize 17
+Set Padding 18
+Set Theme "Catppuccin Mocha"
+Set WindowBar Colorful
+Set BorderRadius 8
+Set Margin 14
+Set MarginFill "#7287fd"
 Set TypingSpeed 20ms
 
 Type "echo the answer is 41"
@@ -22,4 +31,4 @@ Enter
 Wait
 
 # Wrong on purpose: the screen says 41, we claim 42.
-Assert /the answer is 42/
+Assert /(?m)^the answer is 42$/

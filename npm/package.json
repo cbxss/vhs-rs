@@ -7,7 +7,8 @@
     "test": "npm run test:release && npm run test:package",
     "test:package": "node scripts/test-package.mjs",
     "stage": "node scripts/stage.mjs",
-    "test:release": "node --test scripts/test-release.mjs scripts/test-release-source.mjs",
+    "assets": "node scripts/test-examples.mjs --write-assets",
+    "test:release": "node --test scripts/test-release.mjs scripts/test-release-source.mjs scripts/test-crate-release.mjs",
     "format:check": "prettier --check vhs-rs/src vhs-rs/test scripts"
   },
   "devDependencies": {

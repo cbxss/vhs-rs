@@ -51,6 +51,11 @@ jobs:
           npm run build --prefix npm
           npm run test:release --prefix npm
           node npm/scripts/stage.mjs ${{ matrix.platform }} target/${{ matrix.target }}/release/vhs-rs
+      - name: Execute public examples and showcase
+        run: node npm/scripts/test-examples.mjs target/${{ matrix.target }}/release/vhs-rs
+      - name: Package verified Rust crate
+        if: runner.os == 'Linux'
+        run: node npm/scripts/crate-release.mjs stage npm/artifacts
       - name: Installed package tests (Node 22)
         run: npm run test:package --prefix npm
       - uses: actions/setup-node@v4
