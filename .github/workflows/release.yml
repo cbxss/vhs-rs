@@ -48,8 +48,9 @@ jobs:
             console.log('Token records:', rows.length);
             for (const row of rows) {
               const prefix = typeof row.token === 'string' ? row.token : '';
-              const matches = prefix.length > 5 && token.startsWith(prefix);
-              console.log('Token metadata:', JSON.stringify(scrub({name:row.name, permissions:row.permissions, scopes:row.scopes, bypass_2fa:row.bypass_2fa, expiry:row.expiry, accessed:row.accessed, updated:row.updated, revoked:row.revoked})));
+              const [start, end] = prefix.split('...');
+              const matches = prefix.includes('...') && start.length >= 5 && end?.length >= 4 ? token.startsWith(start) && token.endsWith(end) : prefix.length > 5 && token === prefix;
+              console.log('Token metadata:', JSON.stringify(scrub({matchesCurrentToken:matches, name:row.name, permissions:row.permissions, scopes:row.scopes, bypass_2fa:row.bypass_2fa, expiry:row.expiry, accessed:row.accessed, updated:row.updated, revoked:row.revoked})));
               console.log('Masked token format:', JSON.stringify({length:prefix.length, ellipsis:prefix.includes('...'), stars:prefix.includes('*')}));
               console.log(JSON.stringify({matchesCurrentToken: matches,
                 fields: Object.keys(row),
