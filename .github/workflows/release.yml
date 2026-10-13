@@ -101,9 +101,17 @@ jobs:
       - name: Publish verified npm packages
         env:
           RELEASE_TAG: ${{ needs.source.outputs.tag }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH }}
         # Older release commits only understand GITHUB_REF_NAME. Set it for the
         # child process; GitHub ignores overrides of its reserved variables in env.
-        run: GITHUB_REF_NAME="$RELEASE_TAG" node npm/scripts/publish.mjs release-artifacts --publish
+        run: |
+          if [ -n "$NODE_AUTH_TOKEN" ]; then
+            npm_auth_config=$(mktemp "$RUNNER_TEMP/vhs-npm-auth.XXXXXX")
+            trap 'rm "$npm_auth_config"' EXIT
+            printf '%s\n' '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}' > "$npm_auth_config"
+            export NPM_CONFIG_USERCONFIG="$npm_auth_config"
+          fi
+          GITHUB_REF_NAME="$RELEASE_TAG" node npm/scripts/publish.mjs release-artifacts --publish
       - name: Publish verified Rust crate
         if: steps.crate.outputs.upload == 'true'
         env:

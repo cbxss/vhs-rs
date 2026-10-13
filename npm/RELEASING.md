@@ -65,7 +65,10 @@ have access to the `@cbxss` scope. This checkout does not contain credentials.
 5. Future `v<version>` tags run the verification workflow before publishing the
    platform packages, then the SDK, then the GitHub installer archives. Release
    jobs use Node 24, npm 11.16.0 and `id-token: write` for OIDC. No stored npm
-   publishing token is needed for that configured workflow.
+   publishing token is needed for that configured workflow. Alternatively, set
+   the encrypted `NPM_PUBLISH` repository secret to a token with publishing
+   access to all three packages. The publishing step supplies it through a
+   temporary npm config and removes that config when the step exits.
 
 The publish script verifies already-published versions by tarball integrity and
 skips only identical contents. It checks registry visibility before advancing
@@ -93,8 +96,9 @@ when the package exists. Publishing logs include npm's verbose OIDC diagnostics.
 Check the trusted publisher settings for all three packages: `cbxss`, `vhs-rs`,
 `release.yml`, no environment name, and direct `npm publish` allowed. Newly
 configured publishers expire if their first successful publish does not happen
-within two days; recreate an expired configuration. The workflow uses OIDC
-without an npm token or a generated token-auth `.npmrc`.
+within two days; recreate an expired configuration. Without `NPM_PUBLISH`, the
+workflow uses OIDC without a token-auth `.npmrc`. With the secret present, npm
+can fall back to token authentication if the OIDC exchange is rejected.
 
 See [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/) for
 account-side configuration and current CLI requirements.
@@ -114,7 +118,8 @@ present, matching the Eoka publishing setup. Without it, configure a crates.io
 trusted publisher for GitHub owner `cbxss`, repository `vhs-rs`, workflow
 `release.yml`, and no environment name. The pinned official authentication
 action obtains and later revokes a temporary token. Tokens are never stored in
-source files or printed. npm still uses its package-specific trusted publishers.
+source files or printed. npm uses its package-specific trusted publishers or
+the encrypted `NPM_PUBLISH` secret described above.
 
 The workflow validates crate identity and selects authentication before npm
 publication. Upload order is platform npm packages, SDK, Rust crate, then GitHub
