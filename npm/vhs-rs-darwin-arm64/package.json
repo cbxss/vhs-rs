@@ -1,6 +1,6 @@
 {
   "name": "@cbxss/vhs-rs-darwin-arm64",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Prebuilt vhs-rs binary for darwin-arm64",
   "os": [
     "darwin"
@@ -23,5 +23,6 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "homepage": "https://github.com/cbxss/vhs-rs#readme"
 }

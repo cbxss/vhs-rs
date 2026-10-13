@@ -1,6 +1,6 @@
 {
   "name": "@cbxss/vhs-rs-linux-x64",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Prebuilt vhs-rs binary for linux-x64",
   "os": [
     "linux"
@@ -23,5 +23,6 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "homepage": "https://github.com/cbxss/vhs-rs#readme"
 }

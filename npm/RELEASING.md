@@ -1,6 +1,6 @@
 # npm development and release
 
-The next coordinated version is **0.3.1**. Keep `Cargo.toml`, `Cargo.lock`, the
+The next coordinated version is **0.3.2**. Keep `Cargo.toml`, `Cargo.lock`, the
 SDK manifest and both platform manifests (including optional dependency pins)
 at the same version. Commit all runtime changes and test fixtures required by
 the full suite before tagging. The repository may contain unrelated local work;
@@ -98,3 +98,39 @@ without an npm token or a generated token-auth `.npmrc`.
 
 See [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/) for
 account-side configuration and current CLI requirements.
+
+## Rust crate publication
+
+The Linux verification job also packages the Rust crate from its clean checkout
+and retains `crate-receipt.json` with the version, source commit, Rust toolchain,
+and SHA-256. Publication requires that receipt and the original `.crate` file.
+The publisher checks out the same commit and installs the recorded toolchain;
+Cargo's repackaged archive must match before it can be uploaded. Published
+checksums must match before a retry is skipped. Registry errors other than an
+exact-version 404 stop publication.
+
+The release workflow uses the encrypted `CARGO_REGISTRY_TOKEN` secret when
+present, matching the Eoka publishing setup. Without it, configure a crates.io
+trusted publisher for GitHub owner `cbxss`, repository `vhs-rs`, workflow
+`release.yml`, and no environment name. The pinned official authentication
+action obtains and later revokes a temporary token. Tokens are never stored in
+source files or printed. npm still uses its package-specific trusted publishers.
+
+The workflow validates crate identity and selects authentication before npm
+publication. Upload order is platform npm packages, SDK, Rust crate, then GitHub
+assets. Legacy source commits without the crate publisher retain their original
+npm/GitHub-only recovery path. Modern releases missing a crate or receipt fail.
+
+After publication, Linux and macOS jobs freshly install through npm, the pinned
+GitHub installer, and `cargo install --locked --version <version> vhs-rs`. They
+compare npm/installer binary hashes to the original artifact, run the full SDK
+suite against the registry installation, and execute the public examples using
+the installer and Cargo-built binaries. A release is complete only when both
+installation jobs pass. Recover partial publication with its original artifacts;
+do not rebuild and overwrite a version.
+
+For a new release, update Cargo and all npm manifests and exact binary pins,
+run the full CI matrix, and tag the reviewed merged commit. Test fixtures derive
+current versions from manifests; historical recovery fixtures stay historical.
+The earlier 0.3.1 recovery skipped npm uploads and did not prove fresh OIDC
+publication. Check registry bindings or tokens before tagging.

@@ -62,7 +62,7 @@ async function session(t, options = {}) {
 const reason = (expected) => (error) =>
   error instanceof VhsError && error.reason === expected;
 
-test("packed resolver, supported platforms and versions", () => {
+test("packed resolver, supported platforms and versions", async () => {
   assert.ok(resolveBinary().startsWith(root));
   assert.throws(
     () => resolveBinary("win32", "x64"),
@@ -80,7 +80,11 @@ test("packed resolver, supported platforms and versions", () => {
       ),
     reason("missing_binary"),
   );
-  assert.equal(version, "0.3.1");
+  assert.equal(
+    version,
+    JSON.parse(await readFile(new URL("../package.json", import.meta.url)))
+      .version,
+  );
 });
 
 test("batch, file paths, cwd, env, check and all structured failure codes", async (t) => {
